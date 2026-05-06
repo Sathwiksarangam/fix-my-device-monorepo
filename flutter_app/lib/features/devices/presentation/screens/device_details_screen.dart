@@ -1,0 +1,209 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../../../app/router/app_router.dart';
+import '../../../../core/layouts/app_scaffold.dart';
+import '../../../../core/widgets/action_button.dart';
+import '../../../../core/widgets/device_detail_row.dart';
+import '../../../../core/widgets/info_card.dart';
+import '../../../../core/widgets/status_chip.dart';
+import '../../data/models/device.dart';
+import '../../data/services/api_device_service.dart';
+
+class DeviceDetailsScreen extends StatelessWidget {
+  const DeviceDetailsScreen({
+    super.key,
+    this.deviceId,
+  });
+
+  final String? deviceId;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppScaffold(
+      title: 'Device Details',
+      currentRoute: AppRoutes.devices,
+      subtitle:
+          'Review live system metrics, storage details, and connected drive information.',
+      body: FutureBuilder<List<dynamic>>(
+        future: ApiDeviceService().getDevices(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Text('Error: ${snapshot.error}'),
+              ),
+            );
+          }
+
+          final devices = snapshot.data ?? [];
+          final device = devices.firstWhere(
+            (d) =>
+                '${d['id'] ?? d['deviceId'] ?? ''}' ==
+                (deviceId ?? ''),
+            orElse: () => devices.isNotEmpty ? devices.first : null,
+          );
+
+          if (device == null) {
+            return const Center(child: Text('No device found'));
+          }
+
+          final deviceName = '${device['deviceName'] ?? 'Unknown'}';
+          final status = '${device['status'] ?? 'Online'}';
+          final lastSeen = '${device['lastSeenAt'] ?? ''}';
+
+          final deviceStatus = status.toLowerCase() == 'online'
+              ? DeviceStatus.healthy
+              : DeviceStatus.offline;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${device['windowsEdition']} ${device['windowsVersion']}',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleMedium
+                          ?.copyWith(color: Colors.black54),
+                    ),
+                  ),
+                  StatusChip(status: deviceStatus),
+                ],
+              ),
+
+              const SizedBox(height: 18),
+
+              Wrap(
+                spacing: 16,
+                runSpacing: 16,
+                children: [
+                  InfoCard(
+                    title: 'Device',
+                    value: deviceName,
+                    subtitle: 'Last seen $lastSeen',
+                    icon: Icons.computer,
+                  ),
+                  InfoCard(
+                    title: 'Storage',
+                    value: device['totalStorage'],
+                    subtitle: 'Used: ${device['usedStorage']}',
+                    icon: Icons.sd_storage,
+                  ),
+                  InfoCard(
+                    title: 'Graphics',
+                    value: device['graphicsCard'],
+                    subtitle: 'Memory: ${device['graphicsMemory']}',
+                    icon: Icons.memory,
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 24),
+
+              const Text(
+                'System Details',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+
+              const SizedBox(height: 12),
+
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    children: [
+                      DeviceDetailRow(label: 'Device ID', value: '${device['deviceId']}'),
+                      DeviceDetailRow(label: 'Product ID', value: '${device['productId']}'),
+
+                      DeviceDetailRow(label: 'Processor', value: '${device['processor']}'),
+                      DeviceDetailRow(label: 'Speed', value: '${device['processorSpeed']}'),
+
+                      DeviceDetailRow(label: 'Installed RAM', value: '${device['installedRam']}'),
+                      DeviceDetailRow(label: 'Usable RAM', value: '${device['usableRam']}'),
+
+                      DeviceDetailRow(label: 'Graphics', value: '${device['graphicsCard']}'),
+                      DeviceDetailRow(label: 'Graphics Memory', value: '${device['graphicsMemory']}'),
+
+                      DeviceDetailRow(label: 'Total Storage', value: '${device['totalStorage']}'),
+                      DeviceDetailRow(label: 'Used Storage', value: '${device['usedStorage']}'),
+                      DeviceDetailRow(label: 'Free Storage', value: '${device['freeStorage']}'),
+
+                      DeviceDetailRow(label: 'System Type', value: '${device['systemType']}'),
+
+                      DeviceDetailRow(label: 'Windows Edition', value: '${device['windowsEdition']}'),
+                      DeviceDetailRow(label: 'Version', value: '${device['windowsVersion']}'),
+                      DeviceDetailRow(label: 'OS Build', value: '${device['osBuild']}'),
+                      DeviceDetailRow(label: 'Installed On', value: '${device['installedOn']}'),
+
+                      DeviceDetailRow(label: 'Last Seen', value: lastSeen),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              const Text(
+                'Drives',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+
+              const SizedBox(height: 12),
+
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    children: (device['drives'] as List? ?? [])
+                        .map<Widget>((d) => DeviceDetailRow(
+                              label: d['driveLetter'],
+                              value:
+                                  'Total: ${d['totalSize']} | Used: ${d['usedSpace']} | Free: ${d['freeSpace']}',
+                            ))
+                        .toList(),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  ActionButton(
+                    label: 'Browse Files',
+                    icon: Icons.folder_open,
+                    onPressed: () => context.go(
+                        '${AppRoutes.fileBrowser}?id=${device['id']}'),
+                  ),
+                  ActionButton(
+                    label: 'Transfer Files',
+                    icon: Icons.upload_file,
+                    onPressed: () => context.go(
+                        '${AppRoutes.fileTransfer}?id=${device['id']}'),
+                  ),
+                  ActionButton(
+                    label: 'Troubleshoot',
+                    icon: Icons.build,
+                    onPressed: () => context.go(
+                        '${AppRoutes.troubleshooting}?id=${device['id']}'),
+                    isPrimary: false,
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
