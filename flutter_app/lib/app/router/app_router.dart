@@ -24,9 +24,8 @@ class AppRoutes {
 
 class AppRouter {
   static final GoRouter router = GoRouter(
-    initialLocation: AuthService.isLoggedIn
-        ? AppRoutes.devices
-        : AppRoutes.login,
+    initialLocation:
+        AuthService.isLoggedIn ? AppRoutes.devices : AppRoutes.login,
     refreshListenable: AuthService.authState,
     redirect: (BuildContext context, GoRouterState state) {
       final bool loggedIn = AuthService.isLoggedIn;
@@ -41,6 +40,48 @@ class AppRouter {
       }
 
       return null;
+    },
+    errorBuilder: (BuildContext context, GoRouterState state) {
+      return Scaffold(
+        backgroundColor: const Color(0xFFF3F6FA),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'We could not open that page',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      state.error?.toString() ??
+                          'The requested route is unavailable right now.',
+                    ),
+                    const SizedBox(height: 20),
+                    FilledButton(
+                      onPressed: () => router.go(
+                        AuthService.isLoggedIn
+                            ? AppRoutes.devices
+                            : AppRoutes.login,
+                      ),
+                      child: const Text('Back To Safety'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     },
     routes: <RouteBase>[
       GoRoute(

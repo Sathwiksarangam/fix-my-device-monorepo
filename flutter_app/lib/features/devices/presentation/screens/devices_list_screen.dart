@@ -104,8 +104,43 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
           if (snapshot.hasError) {
             return Card(
               child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text('Could not load devices: ${snapshot.error}'),
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    const Text(
+                      'We could not load your devices',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      snapshot.error.toString(),
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: <Widget>[
+                        ActionButton(
+                          label: 'Retry',
+                          icon: Icons.refresh_rounded,
+                          onPressed: _refreshDevices,
+                        ),
+                        ActionButton(
+                          label: 'Download Agent',
+                          icon: Icons.download_rounded,
+                          onPressed: _downloadAgent,
+                          isPrimary: false,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             );
           }
@@ -191,7 +226,8 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
 
               final processor = device['processor'] ?? 'Processor not available';
               final installedRam = device['installedRam'] ?? 'RAM not available';
-              final totalStorage = device['totalStorage'] ?? 'Storage not available';
+              final totalStorage =
+                  device['totalStorage'] ?? 'Storage not available';
               final windowsVersion = device['windowsVersion'] ?? systemType;
 
               return Padding(
@@ -200,7 +236,8 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
                   child: ListTile(
                     contentPadding: const EdgeInsets.all(16),
                     leading: CircleAvatar(
-                      backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                      backgroundColor:
+                          Theme.of(context).colorScheme.primaryContainer,
                       child: Icon(
                         Icons.laptop_windows_rounded,
                         color: Theme.of(context).colorScheme.primary,
@@ -232,9 +269,10 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
                             lastSeen.toString(),
                             overflow: TextOverflow.ellipsis,
                             maxLines: 1,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: Colors.black54,
-                                ),
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: Colors.black54,
+                                    ),
                           ),
                         ],
                       ),

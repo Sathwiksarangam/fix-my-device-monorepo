@@ -13,6 +13,23 @@ class FixMyDeviceApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       routerConfig: AppRouter.router,
+      builder: (BuildContext context, Widget? child) {
+        return ColoredBox(
+          color: const Color(0xFFF3F6FA),
+          child: child ?? const _AppShellFallback(),
+        );
+      },
+    );
+  }
+}
+
+class _AppShellFallback extends StatelessWidget {
+  const _AppShellFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: CircularProgressIndicator(),
     );
   }
 }

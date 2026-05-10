@@ -4,7 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using FixMyDeviceAgent.Services;
 
-const string BackendUrl = "https://fix-my-device-backend.onrender.com/api/devices/system-info-by-code";
+const string BackendUrl = "https://fix-my-device-backend-uuu6.onrender.com/api/devices/system-info-by-code";
 const string ConfigDirectoryName = "Fix My Device Agent";
 const string ConfigFileName = "agent-config.json";
 
