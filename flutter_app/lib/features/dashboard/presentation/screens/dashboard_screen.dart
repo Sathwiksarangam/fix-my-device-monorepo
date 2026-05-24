@@ -19,7 +19,7 @@ class DashboardScreen extends StatelessWidget {
     return AppScaffold(
       title: 'Dashboard',
       currentRoute: AppRoutes.dashboard,
-      subtitle: 'A mock operations overview for diagnostics, device health, and remote support workflows.',
+      subtitle: 'Track connected devices, recovery readiness, and support actions from one place.',
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -72,9 +72,9 @@ class DashboardScreen extends StatelessWidget {
                 onTap: () => context.go(AppRoutes.devices),
               ),
               _DashboardAction(
-                label: 'File Browser',
-                icon: Icons.folder_open_rounded,
-                onTap: () => context.go(AppRoutes.fileBrowser),
+                label: 'Emergency Recovery',
+                icon: Icons.health_and_safety_rounded,
+                onTap: () => context.go(AppRoutes.emergencyRecovery),
               ),
               _DashboardAction(
                 label: 'Transfers',

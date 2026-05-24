@@ -1,6 +1,5 @@
-using System.Net.Mail;
-using System.ComponentModel.DataAnnotations;
 using System.Data;
+using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -551,6 +550,409 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
     }
 });
 
+app.MapPost("/api/recovery/settings", async (RecoverySettingsRequest request) =>
+{
+    if (request is null)
+    {
+        return Results.BadRequest(new { message = "Recovery settings payload is required." });
+    }
+
+    var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
+    if (!IsValidSetupCode(setupCode))
+    {
+        return Results.BadRequest(new { message = "Agent setup code format is invalid." });
+    }
+
+    if (!TryValidateRecoverySettingsRequest(request, out var validationMessage))
+    {
+        return Results.BadRequest(new { message = validationMessage });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, NormalizeOptionalValue(request.DeviceId, 128));
+        if (device is null)
+        {
+            return Results.BadRequest(new { message = "Device must be connected before recovery can be enabled." });
+        }
+
+        var approvedLocations = NormalizeApprovedLocations(request.ApprovedLocations);
+        if (!AreApprovedLocationsSafe(approvedLocations))
+        {
+            return Results.BadRequest(new { message = "Approved recovery locations include an unsupported path." });
+        }
+
+        var approvedLocationsJson = JsonSerializer.Serialize(approvedLocations);
+        var now = DateTimeOffset.UtcNow;
+
+        await using var upsertCommand = new NpgsqlCommand(
+            """
+            insert into recovery_settings (
+                id,
+                user_id,
+                device_id,
+                device_name,
+                enabled,
+                approved_locations,
+                last_synced_at,
+                created_at,
+                updated_at
+            )
+            values (
+                @id,
+                @user_id,
+                @device_id,
+                @device_name,
+                @enabled,
+                @approved_locations,
+                @last_synced_at,
+                @created_at,
+                @updated_at
+            )
+            on conflict (user_id, device_id)
+            do update set
+                device_name = excluded.device_name,
+                enabled = excluded.enabled,
+                approved_locations = excluded.approved_locations,
+                last_synced_at = excluded.last_synced_at,
+                updated_at = excluded.updated_at
+            """,
+            connection);
+
+        upsertCommand.Parameters.AddWithValue("id", Guid.NewGuid());
+        upsertCommand.Parameters.AddWithValue("user_id", user.Id);
+        upsertCommand.Parameters.AddWithValue("device_id", device.Id);
+        upsertCommand.Parameters.AddWithValue("device_name", NormalizeOptionalValue(request.DeviceName, 200));
+        upsertCommand.Parameters.AddWithValue("enabled", request.Enabled);
+        upsertCommand.Parameters.Add(new NpgsqlParameter("approved_locations", NpgsqlDbType.Jsonb) { Value = approvedLocationsJson });
+        upsertCommand.Parameters.AddWithValue("last_synced_at", now);
+        upsertCommand.Parameters.AddWithValue("created_at", now);
+        upsertCommand.Parameters.AddWithValue("updated_at", now);
+        await upsertCommand.ExecuteNonQueryAsync();
+
+        return Results.Ok(new
+        {
+            message = "Emergency recovery settings saved successfully.",
+            enabled = request.Enabled,
+            approvedLocations,
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Recovery settings save failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to save emergency recovery settings right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/api/recovery/settings", async (HttpRequest request) =>
+{
+    var deviceIdValue = request.Query["deviceId"].ToString();
+    if (!Guid.TryParse(deviceIdValue, out var deviceId))
+    {
+        return Results.BadRequest(new { message = "A valid deviceId is required." });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        await using var settingsCommand = new NpgsqlCommand(
+            """
+            select enabled, approved_locations, last_synced_at
+            from recovery_settings
+            where user_id = @user_id
+              and device_id = @device_id
+            limit 1
+            """,
+            connection);
+        settingsCommand.Parameters.AddWithValue("user_id", user.Id);
+        settingsCommand.Parameters.AddWithValue("device_id", device.Id);
+
+        await using var reader = await settingsCommand.ExecuteReaderAsync(CommandBehavior.SingleRow);
+        if (!await reader.ReadAsync())
+        {
+            return Results.Ok(new RecoverySettingsResponse(
+                device.Id.ToString(),
+                device.DeviceName,
+                false,
+                new List<RecoveryApprovedLocationRecord>(),
+                string.Empty));
+        }
+
+        var enabled = reader["enabled"] is bool enabledValue && enabledValue;
+        var approvedLocations = DeserializeApprovedLocations(reader["approved_locations"]?.ToString());
+        var lastSyncedAt = ToIsoString(reader["last_synced_at"]);
+
+        return Results.Ok(new RecoverySettingsResponse(
+            device.Id.ToString(),
+            device.DeviceName,
+            enabled,
+            approvedLocations,
+            lastSyncedAt));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Get recovery settings failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to load emergency recovery settings right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/recovery/file-list", async (RecoveryFileListRequest request) =>
+{
+    if (request is null)
+    {
+        return Results.BadRequest(new { message = "Recovery file list payload is required." });
+    }
+
+    var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
+    if (!IsValidSetupCode(setupCode))
+    {
+        return Results.BadRequest(new { message = "Agent setup code format is invalid." });
+    }
+
+    if (!TryValidateRecoveryFileListRequest(request, out var validationMessage))
+    {
+        return Results.BadRequest(new { message = validationMessage });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var normalizedDeviceId = NormalizeOptionalValue(request.DeviceId, 128);
+        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, normalizedDeviceId);
+        if (device is null)
+        {
+            return Results.BadRequest(new { message = "Device must be connected before recovery files can be scanned." });
+        }
+
+        var settings = await TryGetRecoverySettingsAsync(connection, user.Id, device.Id);
+        if (settings is null || !settings.Enabled)
+        {
+            return Results.BadRequest(new { message = "Emergency recovery mode is not enabled for this device." });
+        }
+
+        var approvedLocations = DeserializeApprovedLocations(settings.ApprovedLocationsJson);
+        var normalizedEntries = NormalizeRecoveryFileEntries(request.Entries);
+
+        if (!AreRecoveryEntriesWithinApprovedLocations(normalizedEntries, approvedLocations))
+        {
+            return Results.BadRequest(new { message = "Recovery file list includes locations outside the approved scope." });
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var deleteCommand = new NpgsqlCommand(
+            """
+            delete from recovery_file_listings
+            where user_id = @user_id
+              and device_id = @device_id
+            """,
+            connection,
+            transaction))
+        {
+            deleteCommand.Parameters.AddWithValue("user_id", user.Id);
+            deleteCommand.Parameters.AddWithValue("device_id", device.Id);
+            await deleteCommand.ExecuteNonQueryAsync();
+        }
+
+        foreach (var entry in normalizedEntries)
+        {
+            await using var insertCommand = new NpgsqlCommand(
+                """
+                insert into recovery_file_listings (
+                    id,
+                    user_id,
+                    device_id,
+                    file_name,
+                    full_path,
+                    extension,
+                    size_bytes,
+                    last_modified_at,
+                    is_directory,
+                    drive_letter,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @id,
+                    @user_id,
+                    @device_id,
+                    @file_name,
+                    @full_path,
+                    @extension,
+                    @size_bytes,
+                    @last_modified_at,
+                    @is_directory,
+                    @drive_letter,
+                    @created_at,
+                    @updated_at
+                )
+                """,
+                connection,
+                transaction);
+
+            insertCommand.Parameters.AddWithValue("id", Guid.NewGuid());
+            insertCommand.Parameters.AddWithValue("user_id", user.Id);
+            insertCommand.Parameters.AddWithValue("device_id", device.Id);
+            insertCommand.Parameters.AddWithValue("file_name", entry.FileName ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("full_path", entry.FullPath ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("extension", entry.Extension ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("size_bytes", entry.SizeBytes);
+            insertCommand.Parameters.AddWithValue("last_modified_at",
+                string.IsNullOrWhiteSpace(entry.LastModified)
+                    ? DBNull.Value
+                    : DateTimeOffset.Parse(entry.LastModified));
+            insertCommand.Parameters.AddWithValue("is_directory", entry.IsDirectory);
+            insertCommand.Parameters.AddWithValue("drive_letter", entry.DriveLetter ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("created_at", DateTimeOffset.UtcNow);
+            insertCommand.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+            await insertCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var updateSettingsCommand = new NpgsqlCommand(
+            """
+            update recovery_settings
+            set device_name = @device_name,
+                last_synced_at = @last_synced_at,
+                updated_at = @updated_at
+            where user_id = @user_id
+              and device_id = @device_id
+            """,
+            connection,
+            transaction))
+        {
+            updateSettingsCommand.Parameters.AddWithValue("device_name", NormalizeOptionalValue(request.DeviceName, 200));
+            updateSettingsCommand.Parameters.AddWithValue("last_synced_at", DateTimeOffset.UtcNow);
+            updateSettingsCommand.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+            updateSettingsCommand.Parameters.AddWithValue("user_id", user.Id);
+            updateSettingsCommand.Parameters.AddWithValue("device_id", device.Id);
+            await updateSettingsCommand.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+
+        return Results.Ok(new
+        {
+            message = "Emergency recovery file list saved successfully.",
+            entriesSaved = normalizedEntries.Count,
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Recovery file list save failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to save emergency recovery file list right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/api/recovery/file-list", async (HttpRequest request) =>
+{
+    var deviceIdValue = request.Query["deviceId"].ToString();
+    if (!Guid.TryParse(deviceIdValue, out var deviceId))
+    {
+        return Results.BadRequest(new { message = "A valid deviceId is required." });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var files = new List<RecoveryFileRecord>();
+        await using var fileListCommand = new NpgsqlCommand(
+            """
+            select
+                file_name,
+                full_path,
+                extension,
+                size_bytes,
+                last_modified_at,
+                is_directory,
+                drive_letter
+            from recovery_file_listings
+            where user_id = @user_id
+              and device_id = @device_id
+            order by is_directory desc, file_name asc
+            """,
+            connection);
+        fileListCommand.Parameters.AddWithValue("user_id", user.Id);
+        fileListCommand.Parameters.AddWithValue("device_id", device.Id);
+
+        await using var reader = await fileListCommand.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            files.Add(new RecoveryFileRecord(
+                reader["file_name"]?.ToString() ?? "Unknown",
+                reader["full_path"]?.ToString() ?? string.Empty,
+                reader["extension"]?.ToString() ?? string.Empty,
+                reader["size_bytes"] is long sizeValue ? sizeValue : 0,
+                ToIsoString(reader["last_modified_at"]),
+                reader["is_directory"] is bool isDirectory && isDirectory,
+                reader["drive_letter"]?.ToString() ?? string.Empty));
+        }
+
+        return Results.Ok(files);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Get recovery file list failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to load emergency recovery file list right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
 app.Run();
 
 static HashSet<string> BuildAllowedOrigins(string? configuredFrontendOrigin)
@@ -645,6 +1047,98 @@ static async Task<AppUserRecord?> TryGetAuthorizedUserAsync(HttpRequest request,
             reader["email"]?.ToString() ?? string.Empty,
             reader["token"]?.ToString() ?? string.Empty,
             reader["agent_setup_code"]?.ToString() ?? string.Empty)
+        : null;
+}
+
+static async Task<AppUserRecord?> TryGetUserBySetupCodeAsync(NpgsqlConnection connection, string setupCode)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select id, email, token, agent_setup_code
+        from app_users
+        where upper(agent_setup_code) = @setup_code
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("setup_code", setupCode);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new AppUserRecord(
+            reader.GetGuid(reader.GetOrdinal("id")),
+            reader["email"]?.ToString() ?? string.Empty,
+            reader["token"]?.ToString() ?? string.Empty,
+            reader["agent_setup_code"]?.ToString() ?? string.Empty)
+        : null;
+}
+
+static async Task<OwnedDeviceRecord?> TryGetOwnedDeviceByIdAsync(NpgsqlConnection connection, Guid userId, Guid deviceId)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select id, user_id, device_id, device_name
+        from devices
+        where id = @id
+          and user_id = @user_id
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("id", deviceId);
+    command.Parameters.AddWithValue("user_id", userId);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new OwnedDeviceRecord(
+            reader.GetGuid(reader.GetOrdinal("id")),
+            reader.GetGuid(reader.GetOrdinal("user_id")),
+            reader["device_id"]?.ToString() ?? string.Empty,
+            reader["device_name"]?.ToString() ?? "Unknown")
+        : null;
+}
+
+static async Task<OwnedDeviceRecord?> TryGetOwnedDeviceByHardwareIdAsync(NpgsqlConnection connection, Guid userId, string deviceHardwareId)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select id, user_id, device_id, device_name
+        from devices
+        where user_id = @user_id
+          and device_id = @device_id
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("user_id", userId);
+    command.Parameters.AddWithValue("device_id", deviceHardwareId);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new OwnedDeviceRecord(
+            reader.GetGuid(reader.GetOrdinal("id")),
+            reader.GetGuid(reader.GetOrdinal("user_id")),
+            reader["device_id"]?.ToString() ?? string.Empty,
+            reader["device_name"]?.ToString() ?? "Unknown")
+        : null;
+}
+
+static async Task<RecoverySettingsStorageRecord?> TryGetRecoverySettingsAsync(NpgsqlConnection connection, Guid userId, Guid deviceId)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select enabled, approved_locations
+        from recovery_settings
+        where user_id = @user_id
+          and device_id = @device_id
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("user_id", userId);
+    command.Parameters.AddWithValue("device_id", deviceId);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new RecoverySettingsStorageRecord(
+            reader["enabled"] is bool enabled && enabled,
+            reader["approved_locations"]?.ToString() ?? "[]")
         : null;
 }
 
@@ -772,6 +1266,82 @@ static bool TryValidateDevicePayload(DeviceSystemInfoRequest request, out string
     return true;
 }
 
+static bool TryValidateRecoverySettingsRequest(RecoverySettingsRequest request, out string message)
+{
+    if (!ValidateRequiredField("Device ID", request.DeviceId, 128, out message) ||
+        !ValidateRequiredField("Device name", request.DeviceName, 200, out message))
+    {
+        return false;
+    }
+
+    if (request.ApprovedLocations is null || request.ApprovedLocations.Count == 0)
+    {
+        message = "At least one approved recovery location is required.";
+        return false;
+    }
+
+    if (request.ApprovedLocations.Count > 32)
+    {
+        message = "Too many approved recovery locations were submitted.";
+        return false;
+    }
+
+    foreach (var location in request.ApprovedLocations)
+    {
+        if (!ValidateRequiredField("Recovery location label", location.Label, 120, out message) ||
+            !ValidateRequiredField("Recovery location path", location.FullPath, 400, out message) ||
+            !ValidateOptionalField("Recovery drive letter", location.DriveLetter, 16, out message) ||
+            !ValidateOptionalField("Recovery location type", location.LocationType, 40, out message))
+        {
+            return false;
+        }
+    }
+
+    message = string.Empty;
+    return true;
+}
+
+static bool TryValidateRecoveryFileListRequest(RecoveryFileListRequest request, out string message)
+{
+    if (!ValidateRequiredField("Device ID", request.DeviceId, 128, out message) ||
+        !ValidateRequiredField("Device name", request.DeviceName, 200, out message))
+    {
+        return false;
+    }
+
+    if (request.Entries is null)
+    {
+        message = "Recovery file entries are required.";
+        return false;
+    }
+
+    if (request.Entries.Count > 5000)
+    {
+        message = "Too many recovery file entries were submitted.";
+        return false;
+    }
+
+    foreach (var entry in request.Entries)
+    {
+        if (!ValidateRequiredField("File name", entry.FileName, 260, out message) ||
+            !ValidateRequiredField("Full path", entry.FullPath, 400, out message) ||
+            !ValidateOptionalField("Extension", entry.Extension, 32, out message) ||
+            !ValidateOptionalField("Drive letter", entry.DriveLetter, 16, out message))
+        {
+            return false;
+        }
+
+        if (entry.SizeBytes < 0)
+        {
+            message = "File size must not be negative.";
+            return false;
+        }
+    }
+
+    message = string.Empty;
+    return true;
+}
+
 static bool ValidateRequiredField(string fieldName, string? value, int maxLength, out string message)
 {
     if (string.IsNullOrWhiteSpace(value))
@@ -864,6 +1434,147 @@ static List<DriveInfoRequest> NormalizeDrives(List<DriveInfoRequest>? drives)
         .ToList();
 }
 
+static List<RecoveryApprovedLocationRecord> NormalizeApprovedLocations(List<RecoveryApprovedLocationRecord>? locations)
+{
+    return (locations ?? new List<RecoveryApprovedLocationRecord>())
+        .Select(location => new RecoveryApprovedLocationRecord(
+            NormalizeOptionalValue(location.Label, 120),
+            NormalizeRecoveryPath(location.FullPath),
+            NormalizeOptionalValue(location.DriveLetter, 16),
+            NormalizeOptionalValue(location.LocationType, 40)))
+        .DistinctBy(location => location.FullPath, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
+static List<RecoveryApprovedLocationRecord> DeserializeApprovedLocations(string? locationsJson)
+{
+    if (string.IsNullOrWhiteSpace(locationsJson))
+    {
+        return new List<RecoveryApprovedLocationRecord>();
+    }
+
+    try
+    {
+        return NormalizeApprovedLocations(
+            JsonSerializer.Deserialize<List<RecoveryApprovedLocationRecord>>(locationsJson) ??
+            new List<RecoveryApprovedLocationRecord>());
+    }
+    catch
+    {
+        return new List<RecoveryApprovedLocationRecord>();
+    }
+}
+
+static bool AreApprovedLocationsSafe(IReadOnlyList<RecoveryApprovedLocationRecord> locations)
+{
+    foreach (var location in locations)
+    {
+        var normalizedPath = NormalizeRecoveryPath(location.FullPath);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return false;
+        }
+
+        if (!Regex.IsMatch(normalizedPath, @"^[A-Z]:\\", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return false;
+        }
+
+        if (normalizedPath.StartsWith(@"C:\Windows", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(@"C:\Program Files", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(@"C:\Program Files (x86)", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (normalizedPath.StartsWith(@"C:\Users\", StringComparison.OrdinalIgnoreCase))
+        {
+            var segments = normalizedPath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length >= 3)
+            {
+                var leaf = segments[^1];
+                var allowedUserFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Pictures",
+                    "Videos",
+                    "Music",
+                };
+
+                if (!allowedUserFolders.Contains(leaf))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+static List<RecoveryFileRecord> NormalizeRecoveryFileEntries(List<RecoveryFileRecord>? entries)
+{
+    return (entries ?? new List<RecoveryFileRecord>())
+        .Select(entry => new RecoveryFileRecord(
+            NormalizeOptionalValue(entry.FileName, 260),
+            NormalizeRecoveryPath(entry.FullPath),
+            NormalizeOptionalValue(entry.Extension, 32),
+            entry.SizeBytes < 0 ? 0 : entry.SizeBytes,
+            NormalizeOptionalValueOrEmpty(entry.LastModified, 64),
+            entry.IsDirectory,
+            NormalizeOptionalValue(entry.DriveLetter, 16)))
+        .DistinctBy(entry => entry.FullPath, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
+static bool AreRecoveryEntriesWithinApprovedLocations(
+    IReadOnlyList<RecoveryFileRecord> entries,
+    IReadOnlyList<RecoveryApprovedLocationRecord> approvedLocations)
+{
+    var approvedRoots = approvedLocations
+        .Select(location => NormalizeRecoveryPath(location.FullPath))
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .ToList();
+
+    if (approvedRoots.Count == 0)
+    {
+        return false;
+    }
+
+    foreach (var entry in entries)
+    {
+        var normalizedPath = NormalizeRecoveryPath(entry.FullPath);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return false;
+        }
+
+        if (!approvedRoots.Any(root => PathStartsWithRoot(normalizedPath, root)))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool PathStartsWithRoot(string fullPath, string root)
+{
+    if (string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (!root.EndsWith('\\'))
+    {
+        root += "\\";
+    }
+
+    return fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+}
+
 static string GenerateAgentSetupCode()
 {
     var raw = Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
@@ -907,6 +1618,40 @@ static string NormalizeOptionalValue(string? value, int maxLength)
         : trimmed[..maxLength];
 }
 
+static string NormalizeOptionalValueOrEmpty(string? value, int maxLength)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return string.Empty;
+    }
+
+    var trimmed = value.Trim();
+    return trimmed.Length <= maxLength
+        ? trimmed
+        : trimmed[..maxLength];
+}
+
+static string NormalizeRecoveryPath(string? path)
+{
+    if (string.IsNullOrWhiteSpace(path))
+    {
+        return string.Empty;
+    }
+
+    var normalized = path.Trim().Replace('/', '\\');
+    while (normalized.Contains(@"\\", StringComparison.Ordinal))
+    {
+        normalized = normalized.Replace(@"\\", @"\");
+    }
+
+    if (Regex.IsMatch(normalized, "^[A-Za-z]:$", RegexOptions.CultureInvariant))
+    {
+        return normalized.ToUpperInvariant() + "\\";
+    }
+
+    return normalized;
+}
+
 static string ToIsoString(object? value)
 {
     return value switch
@@ -930,6 +1675,16 @@ record AppUserRecord(
     string Email,
     string Token,
     string AgentSetupCode);
+
+record OwnedDeviceRecord(
+    Guid Id,
+    Guid UserId,
+    string HardwareDeviceId,
+    string DeviceName);
+
+record RecoverySettingsStorageRecord(
+    bool Enabled,
+    string ApprovedLocationsJson);
 
 record DeviceRecord(
     string Id,
@@ -986,3 +1741,40 @@ record DriveInfoRequest(
     string? TotalSize,
     string? UsedSpace,
     string? FreeSpace);
+
+record RecoverySettingsRequest(
+    string? SetupCode,
+    string? AgentSetupCode,
+    string? DeviceId,
+    string? DeviceName,
+    bool Enabled,
+    List<RecoveryApprovedLocationRecord>? ApprovedLocations);
+
+record RecoverySettingsResponse(
+    string DeviceId,
+    string DeviceName,
+    bool Enabled,
+    List<RecoveryApprovedLocationRecord> ApprovedLocations,
+    string LastSyncedAt);
+
+record RecoveryApprovedLocationRecord(
+    string? Label,
+    string? FullPath,
+    string? DriveLetter,
+    string? LocationType);
+
+record RecoveryFileListRequest(
+    string? SetupCode,
+    string? AgentSetupCode,
+    string? DeviceId,
+    string? DeviceName,
+    List<RecoveryFileRecord>? Entries);
+
+record RecoveryFileRecord(
+    string? FileName,
+    string? FullPath,
+    string? Extension,
+    long SizeBytes,
+    string? LastModified,
+    bool IsDirectory,
+    string? DriveLetter);

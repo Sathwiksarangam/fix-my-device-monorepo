@@ -181,9 +181,9 @@ class _NavigationContent extends StatelessWidget {
       route: AppRoutes.devices,
     ),
     _NavigationItem(
-      label: 'File Browser',
-      icon: Icons.folder_open_rounded,
-      route: AppRoutes.fileBrowser,
+      label: 'Emergency Recovery',
+      icon: Icons.health_and_safety_rounded,
+      route: AppRoutes.emergencyRecovery,
     ),
     _NavigationItem(
       label: 'File Transfer',

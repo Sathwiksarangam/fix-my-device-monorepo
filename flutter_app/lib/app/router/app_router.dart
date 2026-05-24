@@ -16,7 +16,8 @@ class AppRoutes {
   static const dashboard = '/dashboard';
   static const devices = '/devices';
   static const deviceDetails = '/devices/details';
-  static const fileBrowser = '/files/browser';
+  static const emergencyRecovery = '/recovery';
+  static const legacyFileBrowser = '/files/browser';
   static const fileTransfer = '/files/transfer';
   static const troubleshooting = '/troubleshooting';
   static const settings = '/settings';
@@ -110,7 +111,14 @@ class AppRouter {
         },
       ),
       GoRoute(
-        path: AppRoutes.fileBrowser,
+        path: AppRoutes.emergencyRecovery,
+        builder: (BuildContext context, GoRouterState state) {
+          final String? deviceId = state.uri.queryParameters['id'];
+          return FileBrowserScreen(deviceId: deviceId);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.legacyFileBrowser,
         builder: (BuildContext context, GoRouterState state) {
           final String? deviceId = state.uri.queryParameters['id'];
           return FileBrowserScreen(deviceId: deviceId);

@@ -180,10 +180,10 @@ class DeviceDetailsScreen extends StatelessWidget {
                 runSpacing: 12,
                 children: [
                   ActionButton(
-                    label: 'Browse Files',
-                    icon: Icons.folder_open,
+                    label: 'Emergency Recovery',
+                    icon: Icons.health_and_safety_rounded,
                     onPressed: () => context.go(
-                        '${AppRoutes.fileBrowser}?id=${device['id']}'),
+                        '${AppRoutes.emergencyRecovery}?id=${device['id']}'),
                   ),
                   ActionButton(
                     label: 'Transfer Files',

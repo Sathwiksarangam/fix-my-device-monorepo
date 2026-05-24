@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../../../auth/data/auth_service.dart';
+import '../../../files/data/models/recovery_models.dart';
 
 class ApiDeviceService {
   static const String baseUrl = 'https://fix-my-device-backend-uuu6.onrender.com';
@@ -80,6 +81,63 @@ class ApiDeviceService {
     return setupCode;
   }
 
+  Future<RecoverySettings> getRecoverySettings(String deviceId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .get(
+          Uri.parse('$baseUrl/api/recovery/settings?deviceId=$deviceId'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to load emergency recovery settings.',
+      ));
+    }
+
+    final dynamic data = jsonDecode(response.body);
+    if (data is! Map<String, dynamic>) {
+      throw Exception('Emergency recovery settings are unavailable.');
+    }
+
+    return RecoverySettings.fromJson(data);
+  }
+
+  Future<List<RecoveryFileEntry>> getRecoveryFileList(String deviceId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .get(
+          Uri.parse('$baseUrl/api/recovery/file-list?deviceId=$deviceId'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to load emergency recovery files.',
+      ));
+    }
+
+    final dynamic data = jsonDecode(response.body);
+    if (data is! List<dynamic>) {
+      return <RecoveryFileEntry>[];
+    }
+
+    return data
+        .whereType<Map<String, dynamic>>()
+        .map(RecoveryFileEntry.fromJson)
+        .toList();
+  }
+
   String _extractErrorMessage(
     http.Response response, {
     required String fallback,
@@ -90,8 +148,7 @@ class ApiDeviceService {
         final String? message = data['message']?.toString();
         final String? detail = data['detail']?.toString();
         final String? title = data['title']?.toString();
-        final String? error = data['error']?.toString();
-        final String? best = message ?? detail ?? title ?? error;
+        final String? best = message ?? detail ?? title;
 
         if (best != null && best.trim().isNotEmpty) {
           return best.trim();
