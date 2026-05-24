@@ -24,13 +24,14 @@ using var handler = new HttpClientHandler
 
 using var client = new HttpClient(handler);
 client.DefaultRequestHeaders.ConnectionClose = true;
-client.Timeout = TimeSpan.FromSeconds(30);
+client.Timeout = TimeSpan.FromSeconds(120);
 
 while (true)
 {
-    var config = await LoadOrPromptForConfigAsync(configPath);
-    var deviceInfo = service.GetDeviceInfo();
+    var config = await LoadConfigAsync(configPath);
+    config = await ChooseSetupCodeFlowAsync(configPath, config);
 
+    var deviceInfo = service.GetDeviceInfo();
     var payload = new JsonObject
     {
         ["setupCode"] = config.SetupCode,
@@ -57,6 +58,7 @@ while (true)
 
     var json = payload.ToJsonString(jsonOptions);
 
+    Console.WriteLine();
     Console.WriteLine("Sending data to backend...");
 
     try
@@ -77,20 +79,30 @@ while (true)
         Console.WriteLine(response.StatusCode);
         Console.WriteLine();
         Console.WriteLine("Response from backend:");
-        Console.WriteLine(responseText);
+        Console.WriteLine(string.IsNullOrWhiteSpace(responseText) ? "(empty)" : responseText);
 
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
             Console.WriteLine();
-            Console.WriteLine("The saved setup code is invalid.");
+            Console.WriteLine("The saved setup code is invalid. Please enter a new setup code.");
             await DeleteConfigIfExistsAsync(configPath);
             continue;
         }
 
+        if (response.IsSuccessStatusCode)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Device connected successfully. Refresh your dashboard.");
+            break;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("The backend did not accept the device information.");
         break;
     }
     catch (Exception ex)
     {
+        Console.WriteLine();
         Console.WriteLine("Agent failed to send data:");
         Console.WriteLine(ex);
         break;
@@ -112,30 +124,63 @@ static string GetConfigPath()
     return Path.Combine(configDirectory, ConfigFileName);
 }
 
-static async Task<AgentConfig> LoadOrPromptForConfigAsync(string configPath)
+static async Task<AgentConfig?> LoadConfigAsync(string configPath)
 {
-    if (File.Exists(configPath))
+    if (!File.Exists(configPath))
     {
-        try
-        {
-            var existingJson = await File.ReadAllTextAsync(configPath);
-            var existingConfig = JsonSerializer.Deserialize<AgentConfig>(existingJson);
-
-            if (!string.IsNullOrWhiteSpace(existingConfig?.SetupCode))
-            {
-                return existingConfig with
-                {
-                    SetupCode = NormalizeSetupCode(existingConfig.SetupCode),
-                };
-            }
-        }
-        catch
-        {
-            // Fall through and prompt again.
-        }
+        return null;
     }
 
-    return await PromptAndSaveSetupCodeAsync(configPath);
+    try
+    {
+        var existingJson = await File.ReadAllTextAsync(configPath);
+        var existingConfig = JsonSerializer.Deserialize<AgentConfig>(existingJson);
+
+        if (!string.IsNullOrWhiteSpace(existingConfig?.SetupCode))
+        {
+            return existingConfig with
+            {
+                SetupCode = NormalizeSetupCode(existingConfig.SetupCode),
+            };
+        }
+    }
+    catch
+    {
+        // Fall through and ask again.
+    }
+
+    return null;
+}
+
+static async Task<AgentConfig> ChooseSetupCodeFlowAsync(string configPath, AgentConfig? existingConfig)
+{
+    if (existingConfig is null)
+    {
+        return await PromptAndSaveSetupCodeAsync(configPath);
+    }
+
+    while (true)
+    {
+        Console.WriteLine();
+        Console.WriteLine("1. Use saved setup code");
+        Console.WriteLine("2. Enter new setup code");
+        Console.Write("Choose an option: ");
+
+        var choice = Console.ReadLine()?.Trim();
+
+        if (choice == "1")
+        {
+            return existingConfig;
+        }
+
+        if (choice == "2")
+        {
+            await DeleteConfigIfExistsAsync(configPath);
+            return await PromptAndSaveSetupCodeAsync(configPath);
+        }
+
+        Console.WriteLine("Please enter 1 or 2.");
+    }
 }
 
 static async Task<AgentConfig> PromptAndSaveSetupCodeAsync(string configPath)

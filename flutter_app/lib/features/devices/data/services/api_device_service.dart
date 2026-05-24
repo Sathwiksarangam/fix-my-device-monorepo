@@ -1,5 +1,6 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 
 import '../../../auth/data/auth_service.dart';
@@ -8,6 +9,8 @@ class ApiDeviceService {
   static const String baseUrl = 'https://fix-my-device-backend-uuu6.onrender.com';
   static const String agentDownloadUrl =
       'https://fix-my-device-backend-uuu6.onrender.com/downloads/FixMyDeviceAgent.exe';
+  static const String resetAgentCommand =
+      r'Remove-Item "$env:APPDATA\Fix My Device Agent\agent-config.json" -Force -ErrorAction SilentlyContinue';
 
   String _requireToken() {
     final token = AuthService.getToken();
@@ -25,14 +28,19 @@ class ApiDeviceService {
     final response = await http
         .get(
           Uri.parse('$baseUrl/api/devices'),
-          headers: {
+          headers: <String, String>{
             'Authorization': 'Bearer $token',
           },
         )
         .timeout(const Duration(seconds: 30));
 
     if (response.statusCode == 200) {
-      return jsonDecode(response.body) as List<dynamic>;
+      final dynamic data = jsonDecode(response.body);
+      if (data is List<dynamic>) {
+        return data;
+      }
+
+      return <dynamic>[];
     }
 
     throw Exception(_extractErrorMessage(
@@ -47,7 +55,7 @@ class ApiDeviceService {
     final response = await http
         .get(
           Uri.parse('$baseUrl/api/agent/setup-code'),
-          headers: {
+          headers: <String, String>{
             'Authorization': 'Bearer $token',
           },
         )
@@ -82,7 +90,8 @@ class ApiDeviceService {
         final String? message = data['message']?.toString();
         final String? detail = data['detail']?.toString();
         final String? title = data['title']?.toString();
-        final String? best = message ?? detail ?? title;
+        final String? error = data['error']?.toString();
+        final String? best = message ?? detail ?? title ?? error;
 
         if (best != null && best.trim().isNotEmpty) {
           return best.trim();
