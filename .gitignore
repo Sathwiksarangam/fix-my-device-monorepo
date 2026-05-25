@@ -28,3 +28,9 @@ out/
 .flutter-plugins-dependencies
 .packages
 pubspec.lock
+
+fix-my-device/services/backend_api/wwwroot/downloads/*.exe
+
+fix-my-device/services/backend_api/wwwroot/downloads/*.exe
+
+fix-my-device/services/backend_api/wwwroot/downloads/*.exe
