@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthService {
-  static const String baseUrl = 'https://fix-my-device-backend.onrender.com';
+  static const String baseUrl = 'https://fix-my-device-monorepo.onrender.com';
   static const String _tokenKey = 'auth_token';
   static const String _emailKey = 'auth_email';
   static const String _agentSetupCodeKey = 'agent_setup_code';

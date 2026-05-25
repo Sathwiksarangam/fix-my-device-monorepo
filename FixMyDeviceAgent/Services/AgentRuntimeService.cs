@@ -9,7 +9,7 @@ namespace FixMyDeviceAgent.Services;
 
 public sealed class AgentRuntimeService : IDisposable
 {
-    private const string BackendBaseUrl = "https://fix-my-device-backend.onrender.com";
+    private const string BackendBaseUrl = "https://fix-my-device-monorepo.onrender.com";
     private const string DashboardUrl = "https://fix-my-device.netlify.app";
     private const string DeviceInfoEndpoint = "/api/devices/system-info-by-code";
     private const string RecoverySettingsEndpoint = "/api/recovery/settings";

@@ -7,9 +7,9 @@ import '../../../auth/data/auth_service.dart';
 import '../../../files/data/models/recovery_models.dart';
 
 class ApiDeviceService {
-  static const String baseUrl = 'https://fix-my-device-backend.onrender.com';
+  static const String baseUrl = 'https://fix-my-device-monorepo.onrender.com';
   static const String agentDownloadUrl =
-      'https://fix-my-device-backend.onrender.com/downloads/FixMyDeviceAgent.exe';
+      'https://fix-my-device-monorepo.onrender.com/downloads/FixMyDeviceAgent.exe';
   static const String resetAgentCommand =
       r'Remove-Item "$env:APPDATA\Fix My Device Agent\agent-config.json" -Force -ErrorAction SilentlyContinue';
 
