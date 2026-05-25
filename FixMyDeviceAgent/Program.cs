@@ -103,7 +103,7 @@ static async Task RunSetupModeAsync(
     JsonSerializerOptions jsonOptions)
 {
     var existingConfig = await LoadConfigAsync(agentConfigPath);
-    var config = await ChooseSetupCodeFlowAsync(agentConfigPath, existingConfig, forcePrompt: existingConfig is null);
+    var config = await ChooseSetupCodeFlowAsync(agentConfigPath, existingConfig, forcePrompt: true);
     if (config is null)
     {
         Console.WriteLine("Setup was cancelled.");
@@ -272,7 +272,7 @@ static async Task<SyncOutcome> PerformSyncAsync(
         return SyncOutcome.Success;
     }
 
-    var approvedLocations = recoveryConfig.ApprovedLocations.ToList();
+    var approvedLocations = NormalizeApprovedLocationsForSync(recoveryConfig.ApprovedLocations);
 
     var recoverySettingsPayload = new JsonObject
     {
@@ -492,15 +492,7 @@ static async Task<RecoveryConfig?> LoadRecoveryConfigAsync(string configPath)
             return new RecoveryConfig
             {
                 Enabled = existingConfig.Enabled,
-                ApprovedLocations = existingConfig.ApprovedLocations
-                    .Select(location => new RecoveryApprovedLocation
-                    {
-                        Label = location.Label.Trim(),
-                        FullPath = NormalizePath(location.FullPath),
-                        DriveLetter = location.DriveLetter.Trim(),
-                        LocationType = location.LocationType.Trim(),
-                    })
-                    .ToList(),
+                ApprovedLocations = NormalizeApprovedLocationsForSync(existingConfig.ApprovedLocations),
                 UpdatedAtUtc = string.IsNullOrWhiteSpace(existingConfig.UpdatedAtUtc)
                     ? DateTimeOffset.UtcNow.ToString("O")
                     : existingConfig.UpdatedAtUtc,
@@ -564,33 +556,79 @@ static async Task<RecoveryConfig> ChooseRecoverySetupFlowAsync(
         return existingConfig;
     }
 
+    var availableLocations = MergeRecoveryLocations(
+        recoveryService,
+        recoveryService.GetDefaultApprovedLocations(),
+        existingConfig?.ApprovedLocations ?? []);
+    var selectedPaths = new HashSet<string>(
+        (existingConfig?.ApprovedLocations ?? availableLocations)
+            .Select(location => NormalizePath(location.FullPath)),
+        StringComparer.OrdinalIgnoreCase);
+
     while (true)
     {
         Console.WriteLine();
         Console.WriteLine("Emergency Recovery Mode lets Fix My Device prepare a safe file listing before a screen failure happens.");
-        Console.WriteLine("It only scans approved folders and non-system drives. File transfer will be added next.");
-        Console.WriteLine("1. Enable Emergency Recovery Mode");
-        Console.WriteLine("2. Disable Emergency Recovery Mode");
-        Console.Write("Choose an option: ");
+        Console.WriteLine("Select the folders and drives you want included. Selected locations are marked ON.");
+        Console.WriteLine("File transfer is coming next. This version prepares the recovery file list only.");
+        Console.WriteLine();
+
+        for (var index = 0; index < availableLocations.Count; index++)
+        {
+            var location = availableLocations[index];
+            var isSelected = selectedPaths.Contains(NormalizePath(location.FullPath));
+            var displayPath = recoveryService.ResolveDisplayPath(location);
+            Console.WriteLine($"{index + 1}. [{(isSelected ? "ON" : "OFF")}] {location.Label} - {displayPath}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Enter a number to toggle a location.");
+        Console.WriteLine("Enter S to save and continue.");
+        Console.WriteLine("Enter X to disable Emergency Recovery Mode.");
+        Console.Write("Your choice: ");
 
         var choice = Console.ReadLine()?.Trim();
-
-        if (choice == "1")
+        if (string.IsNullOrWhiteSpace(choice))
         {
-            var config = recoveryService.CreateDefaultConfig();
+            Console.WriteLine("Enter a number, S, or X.");
+            continue;
+        }
+
+        if (string.Equals(choice, "S", StringComparison.OrdinalIgnoreCase))
+        {
+            var rawSelectedLocations = availableLocations
+                .Where(location => selectedPaths.Contains(NormalizePath(location.FullPath)))
+                .ToList();
+
+            var selectedLocations = NormalizeApprovedLocationsForSync(rawSelectedLocations);
+
+            var config = new RecoveryConfig
+            {
+                Enabled = selectedLocations.Count > 0,
+                ApprovedLocations = selectedLocations,
+                UpdatedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            };
+
             await SaveRecoveryConfigAsync(configPath, config);
 
             Console.WriteLine();
-            Console.WriteLine("Emergency Recovery Mode enabled for these approved locations:");
-            foreach (var location in config.ApprovedLocations)
+            if (!config.Enabled)
             {
-                Console.WriteLine($"- {location.Label}: {location.FullPath}");
+                Console.WriteLine("Emergency Recovery Mode is disabled.");
+            }
+            else
+            {
+                Console.WriteLine("Emergency Recovery Mode enabled for these approved locations:");
+                foreach (var location in config.ApprovedLocations)
+                {
+                    Console.WriteLine($"- {location.Label}: {recoveryService.ResolveDisplayPath(location)}");
+                }
             }
 
             return config;
         }
 
-        if (choice == "2")
+        if (string.Equals(choice, "X", StringComparison.OrdinalIgnoreCase))
         {
             var disabledConfig = new RecoveryConfig
             {
@@ -605,7 +643,26 @@ static async Task<RecoveryConfig> ChooseRecoverySetupFlowAsync(
             return disabledConfig;
         }
 
-        Console.WriteLine("Please enter 1 or 2.");
+        if (int.TryParse(choice, out var optionNumber) &&
+            optionNumber >= 1 &&
+            optionNumber <= availableLocations.Count)
+        {
+            var location = availableLocations[optionNumber - 1];
+            var normalizedPath = NormalizePath(location.FullPath);
+
+            if (selectedPaths.Contains(normalizedPath))
+            {
+                selectedPaths.Remove(normalizedPath);
+            }
+            else
+            {
+                selectedPaths.Add(normalizedPath);
+            }
+
+            continue;
+        }
+
+        Console.WriteLine("Enter a valid location number, S, or X.");
     }
 }
 
@@ -696,6 +753,70 @@ static string NormalizePath(string? path)
     }
 
     return normalized;
+}
+
+static List<RecoveryApprovedLocation> MergeRecoveryLocations(
+    EmergencyRecoveryService recoveryService,
+    IReadOnlyList<RecoveryApprovedLocation> defaults,
+    IReadOnlyList<RecoveryApprovedLocation> existing)
+{
+    var merged = new List<RecoveryApprovedLocation>();
+    var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var location in defaults.Concat(existing))
+    {
+        var dedupeKey = BuildLocationDedupeKey(recoveryService, location);
+        if (!seenPaths.Add(dedupeKey))
+        {
+            continue;
+        }
+
+        merged.Add(new RecoveryApprovedLocation
+        {
+            Label = location.Label,
+            FullPath = NormalizePath(location.FullPath),
+            DriveLetter = location.DriveLetter,
+            LocationType = location.LocationType,
+        });
+    }
+
+    return merged;
+}
+
+static string BuildLocationDedupeKey(
+    EmergencyRecoveryService recoveryService,
+    RecoveryApprovedLocation location)
+{
+    var displayPath = recoveryService.ResolveDisplayPath(location);
+    return string.IsNullOrWhiteSpace(displayPath)
+        ? NormalizePath(location.FullPath)
+        : NormalizePath(displayPath);
+}
+
+static List<RecoveryApprovedLocation> NormalizeApprovedLocationsForSync(
+    IReadOnlyList<RecoveryApprovedLocation> locations)
+{
+    var normalizedLocations = new List<RecoveryApprovedLocation>();
+    var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var location in locations)
+    {
+        var normalizedPath = NormalizePath(location.FullPath);
+        if (!seenPaths.Add(normalizedPath))
+        {
+            continue;
+        }
+
+        normalizedLocations.Add(new RecoveryApprovedLocation
+        {
+            Label = location.Label.Trim(),
+            FullPath = normalizedPath,
+            DriveLetter = location.DriveLetter.Trim(),
+            LocationType = location.LocationType.Trim(),
+        });
+    }
+
+    return normalizedLocations;
 }
 
 enum AgentMode
