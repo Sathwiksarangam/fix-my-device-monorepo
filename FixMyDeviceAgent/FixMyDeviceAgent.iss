@@ -17,59 +17,12 @@ WizardStyle=modern
 [Files]
 Source: "bin\Release\net10.0-windows\win-x64\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Fix My Device Agent"; ValueData: """{app}\FixMyDeviceAgent.exe"""; Flags: uninsdeletevalue
+
 [Icons]
 Name: "{group}\Fix My Device Agent"; Filename: "{app}\FixMyDeviceAgent.exe"
-Name: "{group}\Fix My Device Agent Setup"; Filename: "{app}\FixMyDeviceAgent.exe"; Parameters: "--setup"
 Name: "{group}\Uninstall Fix My Device Agent"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\FixMyDeviceAgent.exe"; Parameters: "--setup"; Description: "Run Fix My Device Agent setup"; Flags: nowait postinstall skipifsilent
-
-[Code]
-const
-  AgentTaskName = 'FixMyDeviceAgentBackgroundSync';
-
-function GetTaskCreateCommand: string;
-begin
-  Result :=
-    '/Create /F /SC ONLOGON /RL LIMITED ' +
-    '/TN "' + AgentTaskName + '" ' +
-    '/TR ""' + ExpandConstant('{app}\FixMyDeviceAgent.exe') + '" --sync""';
-end;
-
-function GetTaskDeleteCommand: string;
-begin
-  Result := '/Delete /F /TN "' + AgentTaskName + '"';
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
-begin
-  if CurStep = ssPostInstall then
-  begin
-    Exec(
-      ExpandConstant('{cmd}'),
-      '/C schtasks ' + GetTaskCreateCommand,
-      '',
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode);
-  end;
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  ResultCode: Integer;
-begin
-  if CurUninstallStep = usUninstall then
-  begin
-    Exec(
-      ExpandConstant('{cmd}'),
-      '/C schtasks ' + GetTaskDeleteCommand,
-      '',
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode);
-  end;
-end;
+Filename: "{app}\FixMyDeviceAgent.exe"; Description: "Launch Fix My Device Agent"; Flags: nowait postinstall skipifsilent
