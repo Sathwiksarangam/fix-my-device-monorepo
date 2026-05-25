@@ -7,7 +7,7 @@ using FixMyDeviceAgent.Models;
 
 namespace FixMyDeviceAgent.Services;
 
-public sealed class AgentRuntimeService
+public sealed class AgentRuntimeService : IDisposable
 {
     private const string BackendBaseUrl = "https://fix-my-device-backend.onrender.com";
     private const string DashboardUrl = "https://fix-my-device.netlify.app";
@@ -65,6 +65,9 @@ public sealed class AgentRuntimeService
     public Task SaveRecoveryConfigAsync(RecoveryConfig config)
         => _storageService.SaveRecoveryConfigAsync(config);
 
+    public Task DeleteRecoveryConfigAsync()
+        => _storageService.DeleteRecoveryConfigAsync();
+
     public async Task<bool> ValidateSetupCodeAsync(string setupCode)
     {
         var normalizedSetupCode = NormalizeSetupCode(setupCode);
@@ -87,7 +90,9 @@ public sealed class AgentRuntimeService
         var agentConfig = await _storageService.LoadAgentConfigAsync();
         if (agentConfig is null)
         {
-            return SyncExecutionResult.NotConfigured("The agent has not been connected yet.");
+            return SyncExecutionResult.NotConfigured(
+                "The agent has not been connected yet.",
+                []);
         }
 
         var recoveryConfig = await _storageService.LoadRecoveryConfigAsync() ??
@@ -106,27 +111,34 @@ public sealed class AgentRuntimeService
         var normalizedSetupCode = NormalizeSetupCode(agentConfig.SetupCode);
         if (string.IsNullOrWhiteSpace(normalizedSetupCode))
         {
-            return SyncExecutionResult.NotConfigured("The saved setup code is missing.");
+            return SyncExecutionResult.NotConfigured(
+                "The saved setup code is missing.",
+                []);
         }
 
         var deviceInfo = _deviceInfoService.GetDeviceInfo();
         var devicePayload = BuildDevicePayload(normalizedSetupCode, deviceInfo);
+        var traces = new List<ApiCallTrace>();
 
         var deviceSendResult = await SendPostAsync(
             $"{BackendBaseUrl}{DeviceInfoEndpoint}",
             devicePayload.ToJsonString(_jsonOptions));
+        traces.Add(deviceSendResult.ToTrace("Device Sync"));
 
         if (deviceSendResult.StatusCode == HttpStatusCode.Unauthorized)
         {
             await _storageService.DeleteAgentConfigAsync();
-            return SyncExecutionResult.Unauthorized("The saved Agent Setup Code is no longer valid.");
+            return SyncExecutionResult.Unauthorized(
+                "The saved Agent Setup Code is no longer valid.",
+                traces);
         }
 
         if (!deviceSendResult.IsSuccessStatusCode)
         {
             return SyncExecutionResult.Failed(
                 deviceSendResult.ErrorMessage ??
-                "The backend did not accept the device information.");
+                "The backend did not accept the device information.",
+                traces);
         }
 
         var approvedLocations = NormalizeApprovedLocationsForSync(recoveryConfig.ApprovedLocations);
@@ -152,25 +164,31 @@ public sealed class AgentRuntimeService
         var recoverySettingsResult = await SendPostAsync(
             $"{BackendBaseUrl}{RecoverySettingsEndpoint}",
             recoverySettingsPayload.ToJsonString(_jsonOptions));
+        traces.Add(recoverySettingsResult.ToTrace("Recovery Settings"));
 
         if (recoverySettingsResult.StatusCode == HttpStatusCode.Unauthorized)
         {
             await _storageService.DeleteAgentConfigAsync();
-            return SyncExecutionResult.Unauthorized("The saved Agent Setup Code is no longer valid.");
+            return SyncExecutionResult.Unauthorized(
+                "The saved Agent Setup Code is no longer valid.",
+                traces);
         }
 
         if (!recoverySettingsResult.IsSuccessStatusCode)
         {
             return SyncExecutionResult.Failed(
                 recoverySettingsResult.ErrorMessage ??
-                "Emergency Recovery settings could not be saved.");
+                "Emergency Recovery settings could not be saved.",
+                traces);
         }
 
         await _storageService.SaveRecoveryConfigAsync(normalizedRecoveryConfig);
 
         if (!normalizedRecoveryConfig.Enabled)
         {
-            return SyncExecutionResult.Success("Device heartbeat updated. Emergency Recovery is disabled.");
+            return SyncExecutionResult.Success(
+                "Device heartbeat updated. Emergency Recovery is disabled.",
+                traces);
         }
 
         var recoveryEntries = _recoveryService.ScanApprovedLocations(normalizedRecoveryConfig.ApprovedLocations);
@@ -186,22 +204,27 @@ public sealed class AgentRuntimeService
         var recoveryUploadResult = await SendPostAsync(
             $"{BackendBaseUrl}{RecoveryUploadEndpoint}",
             recoveryFileListPayload.ToJsonString(_jsonOptions));
+        traces.Add(recoveryUploadResult.ToTrace("Recovery Inventory"));
 
         if (recoveryUploadResult.StatusCode == HttpStatusCode.Unauthorized)
         {
             await _storageService.DeleteAgentConfigAsync();
-            return SyncExecutionResult.Unauthorized("The saved Agent Setup Code is no longer valid.");
+            return SyncExecutionResult.Unauthorized(
+                "The saved Agent Setup Code is no longer valid.",
+                traces);
         }
 
         if (!recoveryUploadResult.IsSuccessStatusCode)
         {
             return SyncExecutionResult.Failed(
                 recoveryUploadResult.ErrorMessage ??
-                "Emergency Recovery inventory could not be uploaded.");
+                "Emergency Recovery inventory could not be uploaded.",
+                traces);
         }
 
         return SyncExecutionResult.Success(
-            $"Device synced successfully. Recovery inventory updated with {recoveryEntries.Count} entries.");
+            $"Device synced successfully. Recovery inventory updated with {recoveryEntries.Count} entries.",
+            traces);
     }
 
     public void OpenDashboard()
@@ -271,11 +294,12 @@ public sealed class AgentRuntimeService
             return new SendResult(
                 response.IsSuccessStatusCode,
                 response.StatusCode,
-                ExtractErrorMessage(responseText, response.StatusCode));
+                ExtractErrorMessage(responseText, response.StatusCode),
+                responseText);
         }
         catch (Exception ex)
         {
-            return new SendResult(false, 0, ex.Message);
+            return new SendResult(false, 0, ex.Message, ex.ToString());
         }
     }
 
@@ -362,36 +386,50 @@ public sealed class AgentRuntimeService
     private readonly record struct SendResult(
         bool IsSuccessStatusCode,
         HttpStatusCode StatusCode,
-        string ErrorMessage);
+        string ErrorMessage,
+        string ResponseText)
+    {
+        public ApiCallTrace ToTrace(string stepName)
+        {
+            return new ApiCallTrace(
+                stepName,
+                StatusCode == 0 ? "0" : ((int)StatusCode).ToString(),
+                ResponseText);
+        }
+    }
 }
 
 public sealed class SyncExecutionResult
 {
     private SyncExecutionResult(
         SyncExecutionStatus status,
-        string message)
+        string message,
+        IReadOnlyList<ApiCallTrace> traces)
     {
         Status = status;
         Message = message;
+        Traces = traces;
     }
 
     public SyncExecutionStatus Status { get; }
 
     public string Message { get; }
 
+    public IReadOnlyList<ApiCallTrace> Traces { get; }
+
     public bool IsSuccess => Status == SyncExecutionStatus.Success;
 
-    public static SyncExecutionResult Success(string message)
-        => new(SyncExecutionStatus.Success, message);
+    public static SyncExecutionResult Success(string message, IReadOnlyList<ApiCallTrace> traces)
+        => new(SyncExecutionStatus.Success, message, traces);
 
-    public static SyncExecutionResult Failed(string message)
-        => new(SyncExecutionStatus.Failed, message);
+    public static SyncExecutionResult Failed(string message, IReadOnlyList<ApiCallTrace> traces)
+        => new(SyncExecutionStatus.Failed, message, traces);
 
-    public static SyncExecutionResult Unauthorized(string message)
-        => new(SyncExecutionStatus.Unauthorized, message);
+    public static SyncExecutionResult Unauthorized(string message, IReadOnlyList<ApiCallTrace> traces)
+        => new(SyncExecutionStatus.Unauthorized, message, traces);
 
-    public static SyncExecutionResult NotConfigured(string message)
-        => new(SyncExecutionStatus.NotConfigured, message);
+    public static SyncExecutionResult NotConfigured(string message, IReadOnlyList<ApiCallTrace> traces)
+        => new(SyncExecutionStatus.NotConfigured, message, traces);
 }
 
 public enum SyncExecutionStatus
@@ -401,3 +439,8 @@ public enum SyncExecutionStatus
     Unauthorized,
     NotConfigured,
 }
+
+public sealed record ApiCallTrace(
+    string StepName,
+    string StatusCodeText,
+    string ResponseBody);

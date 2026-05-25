@@ -230,7 +230,7 @@ public sealed class AgentTrayApplicationContext : ApplicationContext
     {
         if (!await _syncSemaphore.WaitAsync(0))
         {
-            return SyncExecutionResult.Failed("A sync is already running.");
+            return SyncExecutionResult.Failed("A sync is already running.", []);
         }
 
         try
@@ -238,7 +238,7 @@ public sealed class AgentTrayApplicationContext : ApplicationContext
             var result = await _runtimeService.RunSyncAsync();
             if (isUserInitiated && result.IsSuccess)
             {
-                return SyncExecutionResult.Success(result.Message);
+                return SyncExecutionResult.Success(result.Message, result.Traces);
             }
 
             return result;
