@@ -63,6 +63,97 @@ app.UseCors("AllowFlutterApp");
 
 app.MapGet("/", () => "Fix My Device API is running");
 
+app.MapGet("/api/debug/db-check", async () =>
+{
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        await using var usersCommand = new NpgsqlCommand("select count(*) from app_users", connection);
+        await using var devicesCommand = new NpgsqlCommand("select count(*) from devices", connection);
+
+        var users = Convert.ToInt32(await usersCommand.ExecuteScalarAsync() ?? 0);
+        var devices = Convert.ToInt32(await devicesCommand.ExecuteScalarAsync() ?? 0);
+
+        return Results.Ok(new
+        {
+            database = "ok",
+            users,
+            devices,
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Database debug check failed",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/api/debug/setup-code/{code}", async (string code) =>
+{
+    try
+    {
+        var normalizedCode = NormalizeSetupCode(code);
+        if (string.IsNullOrWhiteSpace(normalizedCode))
+        {
+            return Results.BadRequest(new { message = "Setup code is required." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        await using var command = new NpgsqlCommand(
+            """
+            select id, email, agent_setup_code
+            from app_users
+            where agent_setup_code = @setup_code
+            limit 1
+            """,
+            connection);
+        command.Parameters.AddWithValue("setup_code", normalizedCode);
+
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+        if (!await reader.ReadAsync())
+        {
+            return Results.Json(
+                new
+                {
+                    exists = false,
+                    setupCode = normalizedCode,
+                },
+                statusCode: StatusCodes.Status404NotFound);
+        }
+
+        return Results.Ok(new
+        {
+            exists = true,
+            setupCode = normalizedCode,
+            userId = reader["id"]?.ToString() ?? string.Empty,
+            email = reader["email"]?.ToString() ?? string.Empty,
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Setup code debug check failed",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
 app.MapPost("/api/auth/register", async (RegisterRequest request) =>
 {
     if (!TryValidateRegistration(request, out var validationMessage))
@@ -378,7 +469,7 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
         if (!IsValidSetupCode(setupCode))
         {
             return Results.Json(
-                new { message = "Invalid setup code." },
+                new { message = "Setup code not found." },
                 statusCode: StatusCodes.Status401Unauthorized);
         }
 
@@ -394,7 +485,7 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
             """
             select id
             from app_users
-            where upper(agent_setup_code) = @setup_code
+            where agent_setup_code = @setup_code
             limit 1
             """,
             connection);
@@ -404,7 +495,7 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
         if (userResult is not Guid userId)
         {
             return Results.Json(
-                new { message = "Invalid setup code." },
+                new { message = "Setup code not found." },
                 statusCode: StatusCodes.Status401Unauthorized);
         }
 
@@ -414,148 +505,109 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
         var now = DateTimeOffset.UtcNow;
         var status = NormalizeStatus(request.Status);
 
-        await using var existingDeviceCommand = new NpgsqlCommand(
+        await using var upsertCommand = new NpgsqlCommand(
             """
-            select id
-            from devices
-            where user_id = @user_id
-              and device_id = @device_id
-            limit 1
+            insert into devices (
+                id,
+                user_id,
+                device_name,
+                processor,
+                processor_speed,
+                installed_ram,
+                usable_ram,
+                graphics_card,
+                graphics_memory,
+                total_storage,
+                used_storage,
+                free_storage,
+                device_id,
+                product_id,
+                system_type,
+                windows_edition,
+                windows_version,
+                os_build,
+                installed_on,
+                status,
+                last_seen_at,
+                drives_json,
+                created_at,
+                updated_at
+            )
+            values (
+                @id,
+                @user_id,
+                @device_name,
+                @processor,
+                @processor_speed,
+                @installed_ram,
+                @usable_ram,
+                @graphics_card,
+                @graphics_memory,
+                @total_storage,
+                @used_storage,
+                @free_storage,
+                @device_id,
+                @product_id,
+                @system_type,
+                @windows_edition,
+                @windows_version,
+                @os_build,
+                @installed_on,
+                @status,
+                @last_seen_at,
+                @drives_json,
+                @created_at,
+                @updated_at
+            )
+            on conflict (user_id, device_id)
+            do update set
+                device_name = excluded.device_name,
+                processor = excluded.processor,
+                processor_speed = excluded.processor_speed,
+                installed_ram = excluded.installed_ram,
+                usable_ram = excluded.usable_ram,
+                graphics_card = excluded.graphics_card,
+                graphics_memory = excluded.graphics_memory,
+                total_storage = excluded.total_storage,
+                used_storage = excluded.used_storage,
+                free_storage = excluded.free_storage,
+                product_id = excluded.product_id,
+                system_type = excluded.system_type,
+                windows_edition = excluded.windows_edition,
+                windows_version = excluded.windows_version,
+                os_build = excluded.os_build,
+                installed_on = excluded.installed_on,
+                status = excluded.status,
+                last_seen_at = excluded.last_seen_at,
+                drives_json = excluded.drives_json,
+                updated_at = excluded.updated_at
             """,
             connection);
-        existingDeviceCommand.Parameters.AddWithValue("user_id", userId);
-        existingDeviceCommand.Parameters.AddWithValue("device_id", normalizedDeviceId);
 
-        var existingDeviceResult = await existingDeviceCommand.ExecuteScalarAsync();
+        AddDeviceParameters(
+            upsertCommand,
+            Guid.NewGuid(),
+            userId,
+            request,
+            normalizedDeviceId,
+            status,
+            now,
+            drivesJson,
+            includeCreatedAt: true);
 
-        if (existingDeviceResult is Guid existingDeviceId)
-        {
-            await using var updateCommand = new NpgsqlCommand(
-                """
-                update devices
-                set device_name = @device_name,
-                    processor = @processor,
-                    processor_speed = @processor_speed,
-                    installed_ram = @installed_ram,
-                    usable_ram = @usable_ram,
-                    graphics_card = @graphics_card,
-                    graphics_memory = @graphics_memory,
-                    total_storage = @total_storage,
-                    used_storage = @used_storage,
-                    free_storage = @free_storage,
-                    device_id = @device_id,
-                    product_id = @product_id,
-                    system_type = @system_type,
-                    windows_edition = @windows_edition,
-                    windows_version = @windows_version,
-                    os_build = @os_build,
-                    installed_on = @installed_on,
-                    status = @status,
-                    last_seen_at = @last_seen_at,
-                    drives_json = @drives_json,
-                    updated_at = @updated_at
-                where id = @id
-                  and user_id = @user_id
-                """,
-                connection);
-
-            AddDeviceParameters(
-                updateCommand,
-                existingDeviceId,
-                userId,
-                request,
-                normalizedDeviceId,
-                status,
-                now,
-                drivesJson,
-                includeCreatedAt: false);
-
-            await updateCommand.ExecuteNonQueryAsync();
-        }
-        else
-        {
-            await using var insertCommand = new NpgsqlCommand(
-                """
-                insert into devices (
-                    id,
-                    user_id,
-                    device_name,
-                    processor,
-                    processor_speed,
-                    installed_ram,
-                    usable_ram,
-                    graphics_card,
-                    graphics_memory,
-                    total_storage,
-                    used_storage,
-                    free_storage,
-                    device_id,
-                    product_id,
-                    system_type,
-                    windows_edition,
-                    windows_version,
-                    os_build,
-                    installed_on,
-                    status,
-                    last_seen_at,
-                    drives_json,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @id,
-                    @user_id,
-                    @device_name,
-                    @processor,
-                    @processor_speed,
-                    @installed_ram,
-                    @usable_ram,
-                    @graphics_card,
-                    @graphics_memory,
-                    @total_storage,
-                    @used_storage,
-                    @free_storage,
-                    @device_id,
-                    @product_id,
-                    @system_type,
-                    @windows_edition,
-                    @windows_version,
-                    @os_build,
-                    @installed_on,
-                    @status,
-                    @last_seen_at,
-                    @drives_json,
-                    @created_at,
-                    @updated_at
-                )
-                """,
-                connection);
-
-            AddDeviceParameters(
-                insertCommand,
-                Guid.NewGuid(),
-                userId,
-                request,
-                normalizedDeviceId,
-                status,
-                now,
-                drivesJson,
-                includeCreatedAt: true);
-
-            await insertCommand.ExecuteNonQueryAsync();
-        }
+        await upsertCommand.ExecuteNonQueryAsync();
 
         return Results.Ok(new { message = "System info saved successfully" });
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine("System info save failed:");
-        Console.Error.WriteLine(ex);
+        Console.Error.WriteLine(ex.ToString());
         return Results.Json(
             new
             {
                 message = "Device sync failed",
-                error = ex.ToString(),
+                error = ex.Message,
+                details = ex.ToString(),
             },
             statusCode: StatusCodes.Status500InternalServerError);
     }
@@ -1172,7 +1224,7 @@ static async Task<AppUserRecord?> TryGetUserBySetupCodeAsync(NpgsqlConnection co
         """
         select id, email, token, agent_setup_code
         from app_users
-        where upper(agent_setup_code) = @setup_code
+        where agent_setup_code = @setup_code
         limit 1
         """,
         connection);

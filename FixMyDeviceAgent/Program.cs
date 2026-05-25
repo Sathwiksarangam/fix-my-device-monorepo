@@ -128,6 +128,7 @@ internal static class Program
                                          runtime.RecoveryService.CreateDefaultConfig();
             await runtime.SaveRecoveryConfigAsync(existingRecoveryConfig);
 
+            ShowOutgoingDeviceSync(runtime, setupCode);
             var result = await runtime.RunSyncAsync(agentConfig, existingRecoveryConfig);
             ShowSyncResult(result);
 
@@ -153,6 +154,11 @@ internal static class Program
             return;
         }
 
+        var currentConfig = await runtime.LoadAgentConfigAsync();
+        if (currentConfig is not null)
+        {
+            ShowOutgoingDeviceSync(runtime, currentConfig.SetupCode);
+        }
         var result = await runtime.RunSyncAsync();
         ShowSyncResult(result);
 
@@ -259,6 +265,11 @@ internal static class Program
                 Console.WriteLine("Unsupported or unsafe folder paths will be skipped automatically.");
                 Console.WriteLine();
 
+                var currentConfig = await runtime.LoadAgentConfigAsync();
+                if (currentConfig is not null)
+                {
+                    ShowOutgoingDeviceSync(runtime, currentConfig.SetupCode);
+                }
                 var result = await runtime.RunSyncAsync();
                 ShowSyncResult(result);
 
@@ -355,6 +366,18 @@ internal static class Program
             Console.WriteLine(string.IsNullOrWhiteSpace(trace.ResponseBody) ? "(empty)" : trace.ResponseBody);
             Console.WriteLine();
         }
+    }
+
+    private static void ShowOutgoingDeviceSync(AgentRuntimeService runtime, string setupCode)
+    {
+        Console.Clear();
+        WriteSectionTitle("Fix My Device Agent");
+        Console.WriteLine("Calling endpoint:");
+        Console.WriteLine(runtime.GetDeviceSyncEndpoint());
+        Console.WriteLine();
+        Console.WriteLine("Request JSON body:");
+        Console.WriteLine(runtime.BuildDeviceSyncRequestBody(setupCode));
+        Console.WriteLine();
     }
 
     private static List<RecoveryApprovedLocation> MergeRecoveryLocations(

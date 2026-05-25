@@ -85,6 +85,17 @@ public sealed class AgentRuntimeService : IDisposable
         return result.StatusCode != HttpStatusCode.Unauthorized && result.IsSuccessStatusCode;
     }
 
+    public string GetDeviceSyncEndpoint()
+        => $"{BackendBaseUrl}{DeviceInfoEndpoint}";
+
+    public string BuildDeviceSyncRequestBody(string setupCode)
+    {
+        var normalizedSetupCode = NormalizeSetupCode(setupCode);
+        var deviceInfo = _deviceInfoService.GetDeviceInfo();
+        var payload = BuildDevicePayload(normalizedSetupCode, deviceInfo);
+        return payload.ToJsonString(_jsonOptions);
+    }
+
     public async Task<SyncExecutionResult> RunSyncAsync()
     {
         var agentConfig = await _storageService.LoadAgentConfigAsync();
