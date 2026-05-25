@@ -454,6 +454,9 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
 {
     try
     {
+        Console.WriteLine("Device sync request received");
+        Console.WriteLine(JsonSerializer.Serialize(request));
+
         if (request is null)
         {
             return Results.BadRequest(new { message = "Device payload is required." });
