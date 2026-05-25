@@ -30,6 +30,22 @@ class RecoverySettings {
       lastSyncedAt: json['lastSyncedAt']?.toString() ?? '',
     );
   }
+
+  RecoverySettings copyWith({
+    String? deviceId,
+    String? deviceName,
+    bool? enabled,
+    List<RecoveryApprovedLocation>? approvedLocations,
+    String? lastSyncedAt,
+  }) {
+    return RecoverySettings(
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
+      enabled: enabled ?? this.enabled,
+      approvedLocations: approvedLocations ?? this.approvedLocations,
+      lastSyncedAt: lastSyncedAt ?? this.lastSyncedAt,
+    );
+  }
 }
 
 class RecoveryApprovedLocation {
@@ -52,6 +68,15 @@ class RecoveryApprovedLocation {
       driveLetter: json['driveLetter']?.toString() ?? '',
       locationType: json['locationType']?.toString() ?? '',
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'label': label,
+      'fullPath': fullPath,
+      'driveLetter': driveLetter,
+      'locationType': locationType,
+    };
   }
 }
 
@@ -87,6 +112,50 @@ class RecoveryFileEntry {
       lastModified: json['lastModified']?.toString() ?? '',
       isDirectory: json['isDirectory'] == true,
       driveLetter: json['driveLetter']?.toString() ?? '',
+    );
+  }
+}
+
+class RecoveryInventory {
+  const RecoveryInventory({
+    required this.deviceId,
+    required this.deviceName,
+    required this.enabled,
+    required this.approvedLocations,
+    required this.totalFiles,
+    required this.lastScanTime,
+    required this.files,
+  });
+
+  final String deviceId;
+  final String deviceName;
+  final bool enabled;
+  final List<RecoveryApprovedLocation> approvedLocations;
+  final int totalFiles;
+  final String lastScanTime;
+  final List<RecoveryFileEntry> files;
+
+  factory RecoveryInventory.fromJson(Map<String, dynamic> json) {
+    final dynamic rawLocations = json['approvedLocations'];
+    final dynamic rawFiles = json['files'];
+    final dynamic totalFilesValue = json['totalFiles'];
+
+    return RecoveryInventory(
+      deviceId: json['deviceId']?.toString() ?? '',
+      deviceName: json['deviceName']?.toString() ?? 'Unknown Device',
+      enabled: json['enabled'] == true,
+      approvedLocations: (rawLocations is List<dynamic> ? rawLocations : <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(RecoveryApprovedLocation.fromJson)
+          .toList(),
+      totalFiles: totalFilesValue is int
+          ? totalFilesValue
+          : int.tryParse(totalFilesValue?.toString() ?? '') ?? 0,
+      lastScanTime: json['lastScanTime']?.toString() ?? '',
+      files: (rawFiles is List<dynamic> ? rawFiles : <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(RecoveryFileEntry.fromJson)
+          .toList(),
     );
   }
 }

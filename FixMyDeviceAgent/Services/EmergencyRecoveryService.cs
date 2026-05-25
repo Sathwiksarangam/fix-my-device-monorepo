@@ -492,7 +492,7 @@ public sealed class EmergencyRecoveryService
         }
 
         return segments.Length >= 5 &&
-               segments[2].StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase) &&
+               segments[3].StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase) &&
                segments[4].Equals(folderName, StringComparison.OrdinalIgnoreCase);
     }
 

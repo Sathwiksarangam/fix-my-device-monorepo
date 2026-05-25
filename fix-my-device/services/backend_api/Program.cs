@@ -39,11 +39,8 @@ if (string.IsNullOrWhiteSpace(connectionString))
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+app.UseSwagger();
+app.UseSwaggerUI();
 
 var contentTypeProvider = new FileExtensionContentTypeProvider();
 contentTypeProvider.Mappings[".exe"] = "application/octet-stream";
@@ -550,7 +547,7 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
     }
 });
 
-app.MapPost("/api/recovery/settings", async (RecoverySettingsRequest request) =>
+app.MapPost("/api/recovery/settings", async (HttpRequest httpRequest, RecoverySettingsRequest request) =>
 {
     if (request is null)
     {
@@ -558,7 +555,8 @@ app.MapPost("/api/recovery/settings", async (RecoverySettingsRequest request) =>
     }
 
     var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
-    if (!IsValidSetupCode(setupCode))
+    var hasSetupCode = !string.IsNullOrWhiteSpace(setupCode);
+    if (hasSetupCode && !IsValidSetupCode(setupCode))
     {
         return Results.BadRequest(new { message = "Agent setup code format is invalid." });
     }
@@ -573,22 +571,30 @@ app.MapPost("/api/recovery/settings", async (RecoverySettingsRequest request) =>
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
 
-        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        var user = await TryGetAuthorizedUserAsync(httpRequest, connection);
+        if (user is null && hasSetupCode)
+        {
+            user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        }
+
         if (user is null)
         {
             return Results.Unauthorized();
         }
 
-        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, NormalizeOptionalValue(request.DeviceId, 128));
+        var device = await TryResolveRecoveryDeviceAsync(
+            connection,
+            user.Id,
+            NormalizeOptionalValueOrEmpty(request.DeviceId, 128));
         if (device is null)
         {
             return Results.BadRequest(new { message = "Device must be connected before recovery can be enabled." });
         }
 
-        var approvedLocations = NormalizeApprovedLocations(request.ApprovedLocations);
-        if (!AreApprovedLocationsSafe(approvedLocations))
+        var approvedLocations = FilterSupportedApprovedLocations(request.ApprovedLocations);
+        if (request.Enabled && approvedLocations.Count == 0)
         {
-            return Results.BadRequest(new { message = "Approved recovery locations include an unsupported path." });
+            return Results.BadRequest(new { message = "No supported recovery locations were submitted." });
         }
 
         var approvedLocationsJson = JsonSerializer.Serialize(approvedLocations);
@@ -725,7 +731,7 @@ app.MapGet("/api/recovery/settings", async (HttpRequest request) =>
     }
 });
 
-app.MapPost("/api/recovery/file-list", async (RecoveryFileListRequest request) =>
+app.MapPost("/api/recovery/upload", async (RecoveryFileListRequest request) =>
 {
     if (request is null)
     {
@@ -768,12 +774,9 @@ app.MapPost("/api/recovery/file-list", async (RecoveryFileListRequest request) =
         }
 
         var approvedLocations = DeserializeApprovedLocations(settings.ApprovedLocationsJson);
-        var normalizedEntries = NormalizeRecoveryFileEntries(request.Entries);
-
-        if (!AreRecoveryEntriesWithinApprovedLocations(normalizedEntries, approvedLocations))
-        {
-            return Results.BadRequest(new { message = "Recovery file list includes locations outside the approved scope." });
-        }
+        var normalizedEntries = FilterRecoveryEntriesWithinApprovedLocations(
+            NormalizeRecoveryFileEntries(request.Entries),
+            approvedLocations);
 
         await using var transaction = await connection.BeginTransactionAsync();
 
@@ -953,6 +956,105 @@ app.MapGet("/api/recovery/file-list", async (HttpRequest request) =>
     }
 });
 
+app.MapGet("/api/recovery/{deviceId:guid}", async (HttpRequest request, Guid deviceId) =>
+{
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var enabled = false;
+        var approvedLocations = new List<RecoveryApprovedLocationRecord>();
+        var lastScanTime = string.Empty;
+
+        await using (var settingsCommand = new NpgsqlCommand(
+            """
+            select enabled, approved_locations, last_synced_at
+            from recovery_settings
+            where user_id = @user_id
+              and device_id = @device_id
+            limit 1
+            """,
+            connection))
+        {
+            settingsCommand.Parameters.AddWithValue("user_id", user.Id);
+            settingsCommand.Parameters.AddWithValue("device_id", device.Id);
+
+            await using var settingsReader = await settingsCommand.ExecuteReaderAsync(CommandBehavior.SingleRow);
+            if (await settingsReader.ReadAsync())
+            {
+                enabled = settingsReader["enabled"] is bool enabledValue && enabledValue;
+                approvedLocations = DeserializeApprovedLocations(settingsReader["approved_locations"]?.ToString());
+                lastScanTime = ToIsoString(settingsReader["last_synced_at"]);
+            }
+        }
+
+        var files = new List<RecoveryFileRecord>();
+        await using (var fileListCommand = new NpgsqlCommand(
+            """
+            select
+                file_name,
+                full_path,
+                extension,
+                size_bytes,
+                last_modified_at,
+                is_directory,
+                drive_letter
+            from recovery_file_listings
+            where user_id = @user_id
+              and device_id = @device_id
+            order by is_directory desc, file_name asc
+            """,
+            connection))
+        {
+            fileListCommand.Parameters.AddWithValue("user_id", user.Id);
+            fileListCommand.Parameters.AddWithValue("device_id", device.Id);
+
+            await using var reader = await fileListCommand.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                files.Add(new RecoveryFileRecord(
+                    reader["file_name"]?.ToString() ?? "Unknown",
+                    reader["full_path"]?.ToString() ?? string.Empty,
+                    reader["extension"]?.ToString() ?? string.Empty,
+                    reader["size_bytes"] is long sizeValue ? sizeValue : 0,
+                    ToIsoString(reader["last_modified_at"]),
+                    reader["is_directory"] is bool isDirectory && isDirectory,
+                    reader["drive_letter"]?.ToString() ?? string.Empty));
+            }
+        }
+
+        return Results.Ok(new RecoveryInventoryResponse(
+            device.Id.ToString(),
+            device.DeviceName,
+            enabled,
+            approvedLocations,
+            files.Count,
+            lastScanTime,
+            files));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Get recovery inventory failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to load emergency recovery inventory right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
 app.Run();
 
 static HashSet<string> BuildAllowedOrigins(string? configuredFrontendOrigin)
@@ -1120,6 +1222,24 @@ static async Task<OwnedDeviceRecord?> TryGetOwnedDeviceByHardwareIdAsync(NpgsqlC
         : null;
 }
 
+static async Task<OwnedDeviceRecord?> TryResolveRecoveryDeviceAsync(
+    NpgsqlConnection connection,
+    Guid userId,
+    string rawDeviceIdentifier)
+{
+    if (Guid.TryParse(rawDeviceIdentifier, out var deviceId))
+    {
+        return await TryGetOwnedDeviceByIdAsync(connection, userId, deviceId);
+    }
+
+    if (string.IsNullOrWhiteSpace(rawDeviceIdentifier))
+    {
+        return null;
+    }
+
+    return await TryGetOwnedDeviceByHardwareIdAsync(connection, userId, rawDeviceIdentifier);
+}
+
 static async Task<RecoverySettingsStorageRecord?> TryGetRecoverySettingsAsync(NpgsqlConnection connection, Guid userId, Guid deviceId)
 {
     await using var command = new NpgsqlCommand(
@@ -1274,19 +1394,19 @@ static bool TryValidateRecoverySettingsRequest(RecoverySettingsRequest request, 
         return false;
     }
 
-    if (request.ApprovedLocations is null || request.ApprovedLocations.Count == 0)
+    if (request.Enabled && (request.ApprovedLocations is null || request.ApprovedLocations.Count == 0))
     {
         message = "At least one approved recovery location is required.";
         return false;
     }
 
-    if (request.ApprovedLocations.Count > 32)
+    if (request.ApprovedLocations is { Count: > 32 })
     {
         message = "Too many approved recovery locations were submitted.";
         return false;
     }
 
-    foreach (var location in request.ApprovedLocations)
+    foreach (var location in request.ApprovedLocations ?? new List<RecoveryApprovedLocationRecord>())
     {
         if (!ValidateRequiredField("Recovery location label", location.Label, 120, out message) ||
             !ValidateRequiredField("Recovery location path", location.FullPath, 400, out message) ||
@@ -1446,6 +1566,13 @@ static List<RecoveryApprovedLocationRecord> NormalizeApprovedLocations(List<Reco
         .ToList();
 }
 
+static List<RecoveryApprovedLocationRecord> FilterSupportedApprovedLocations(List<RecoveryApprovedLocationRecord>? locations)
+{
+    return NormalizeApprovedLocations(locations)
+        .Where(location => IsSupportedApprovedLocation(location.FullPath))
+        .ToList();
+}
+
 static List<RecoveryApprovedLocationRecord> DeserializeApprovedLocations(string? locationsJson)
 {
     if (string.IsNullOrWhiteSpace(locationsJson))
@@ -1465,55 +1592,6 @@ static List<RecoveryApprovedLocationRecord> DeserializeApprovedLocations(string?
     }
 }
 
-static bool AreApprovedLocationsSafe(IReadOnlyList<RecoveryApprovedLocationRecord> locations)
-{
-    foreach (var location in locations)
-    {
-        var normalizedPath = NormalizeRecoveryPath(location.FullPath);
-        if (string.IsNullOrWhiteSpace(normalizedPath))
-        {
-            return false;
-        }
-
-        if (!Regex.IsMatch(normalizedPath, @"^[A-Z]:\\", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-        {
-            return false;
-        }
-
-        if (normalizedPath.StartsWith(@"C:\Windows", StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.StartsWith(@"C:\Program Files", StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.StartsWith(@"C:\Program Files (x86)", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (normalizedPath.StartsWith(@"C:\Users\", StringComparison.OrdinalIgnoreCase))
-        {
-            var segments = normalizedPath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
-            if (segments.Length >= 3)
-            {
-                var leaf = segments[^1];
-                var allowedUserFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "Desktop",
-                    "Documents",
-                    "Downloads",
-                    "Pictures",
-                    "Videos",
-                    "Music",
-                };
-
-                if (!allowedUserFolders.Contains(leaf))
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
 static List<RecoveryFileRecord> NormalizeRecoveryFileEntries(List<RecoveryFileRecord>? entries)
 {
     return (entries ?? new List<RecoveryFileRecord>())
@@ -1529,35 +1607,29 @@ static List<RecoveryFileRecord> NormalizeRecoveryFileEntries(List<RecoveryFileRe
         .ToList();
 }
 
-static bool AreRecoveryEntriesWithinApprovedLocations(
+static List<RecoveryFileRecord> FilterRecoveryEntriesWithinApprovedLocations(
     IReadOnlyList<RecoveryFileRecord> entries,
     IReadOnlyList<RecoveryApprovedLocationRecord> approvedLocations)
 {
     var approvedRoots = approvedLocations
         .Select(location => NormalizeRecoveryPath(location.FullPath))
         .Where(path => !string.IsNullOrWhiteSpace(path))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    if (approvedRoots.Count == 0)
-    {
-        return false;
-    }
-
-    foreach (var entry in entries)
-    {
-        var normalizedPath = NormalizeRecoveryPath(entry.FullPath);
-        if (string.IsNullOrWhiteSpace(normalizedPath))
+    return entries
+        .Where(entry =>
         {
-            return false;
-        }
+            var normalizedPath = NormalizeRecoveryPath(entry.FullPath);
+            if (string.IsNullOrWhiteSpace(normalizedPath) || IsUnsafeRecoveryPath(normalizedPath))
+            {
+                return false;
+            }
 
-        if (!approvedRoots.Any(root => PathStartsWithRoot(normalizedPath, root)))
-        {
-            return false;
-        }
-    }
-
-    return true;
+            return approvedRoots.Any(root => IsEntryWithinApprovedRoot(normalizedPath, root));
+        })
+        .DistinctBy(entry => entry.FullPath, StringComparer.OrdinalIgnoreCase)
+        .ToList();
 }
 
 static bool PathStartsWithRoot(string fullPath, string root)
@@ -1573,6 +1645,148 @@ static bool PathStartsWithRoot(string fullPath, string root)
     }
 
     return fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsEntryWithinApprovedRoot(string fullPath, string approvedRoot)
+{
+    if (IsKnownRecoveryFolderToken(approvedRoot))
+    {
+        return approvedRoot.ToUpperInvariant() switch
+        {
+            "%FMD_DESKTOP%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Desktop"),
+            "%FMD_DOCUMENTS%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Documents"),
+            "%FMD_DOWNLOADS%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Downloads"),
+            "%FMD_PICTURES%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Pictures"),
+            "%FMD_VIDEOS%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Videos"),
+            "%FMD_MUSIC%" => IsAllowedRecoveryUserFolderFamily(fullPath, "Music"),
+            _ => false,
+        };
+    }
+
+    return PathStartsWithRoot(fullPath, approvedRoot);
+}
+
+static bool IsAllowedApprovedUserFolderPath(string normalizedPath)
+{
+    return IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Desktop") ||
+           IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Documents") ||
+           IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Downloads") ||
+           IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Pictures") ||
+           IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Videos") ||
+           IsAllowedApprovedUserFolderFamilyRoot(normalizedPath, "Music");
+}
+
+static bool IsAllowedApprovedDriveRoot(string normalizedPath)
+{
+    return Regex.IsMatch(normalizedPath, "^[D-Z]:\\\\$", RegexOptions.CultureInvariant);
+}
+
+static bool IsSupportedApprovedLocation(string? path)
+{
+    var normalizedPath = NormalizeRecoveryPath(path);
+    if (string.IsNullOrWhiteSpace(normalizedPath))
+    {
+        return false;
+    }
+
+    if (IsKnownRecoveryFolderToken(normalizedPath))
+    {
+        return true;
+    }
+
+    if (IsUnsafeRecoveryPath(normalizedPath))
+    {
+        return false;
+    }
+
+    return IsAllowedApprovedUserFolderPath(normalizedPath) ||
+           IsAllowedApprovedDriveRoot(normalizedPath);
+}
+
+static bool IsAllowedApprovedUserFolderFamilyRoot(string normalizedPath, string folderName)
+{
+    var segments = SplitPathSegments(normalizedPath);
+    if (segments.Length < 4 ||
+        !segments[0].Equals("C:", StringComparison.OrdinalIgnoreCase) ||
+        !segments[1].Equals("Users", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    if (segments.Length == 4 &&
+        segments[3].Equals(folderName, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    return segments.Length == 5 &&
+           segments[3].StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase) &&
+           segments[4].Equals(folderName, StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsAllowedRecoveryUserFolderFamily(string normalizedPath, string folderName)
+{
+    var segments = SplitPathSegments(normalizedPath);
+    if (segments.Length < 4 ||
+        !segments[0].Equals("C:", StringComparison.OrdinalIgnoreCase) ||
+        !segments[1].Equals("Users", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    if (segments[3].Equals(folderName, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    return segments.Length >= 5 &&
+           segments[3].StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase) &&
+           segments[4].Equals(folderName, StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsUnsafeRecoveryPath(string normalizedPath)
+{
+    if (string.IsNullOrWhiteSpace(normalizedPath))
+    {
+        return true;
+    }
+
+    if (!Regex.IsMatch(normalizedPath, @"^[A-Z]:\\", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+    {
+        return true;
+    }
+
+    if (normalizedPath.StartsWith(@"C:\Windows", StringComparison.OrdinalIgnoreCase) ||
+        normalizedPath.StartsWith(@"C:\Program Files", StringComparison.OrdinalIgnoreCase) ||
+        normalizedPath.StartsWith(@"C:\Program Files (x86)", StringComparison.OrdinalIgnoreCase) ||
+        normalizedPath.StartsWith(@"C:\ProgramData", StringComparison.OrdinalIgnoreCase) ||
+        normalizedPath.StartsWith(@"C:\Recovery", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (normalizedPath.StartsWith(@"C:\Users\", StringComparison.OrdinalIgnoreCase) &&
+        !IsAllowedRecoveryUserFolderPath(normalizedPath))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static bool IsAllowedRecoveryUserFolderPath(string normalizedPath)
+{
+    return IsAllowedRecoveryUserFolderFamily(normalizedPath, "Desktop") ||
+           IsAllowedRecoveryUserFolderFamily(normalizedPath, "Documents") ||
+           IsAllowedRecoveryUserFolderFamily(normalizedPath, "Downloads") ||
+           IsAllowedRecoveryUserFolderFamily(normalizedPath, "Pictures") ||
+           IsAllowedRecoveryUserFolderFamily(normalizedPath, "Videos") ||
+           IsAllowedRecoveryUserFolderFamily(normalizedPath, "Music");
+}
+
+static string[] SplitPathSegments(string normalizedPath)
+{
+    return normalizedPath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
 }
 
 static string GenerateAgentSetupCode()
@@ -1639,6 +1853,11 @@ static string NormalizeRecoveryPath(string? path)
     }
 
     var normalized = path.Trim().Replace('/', '\\');
+    if (IsKnownRecoveryFolderToken(normalized))
+    {
+        return normalized.ToUpperInvariant();
+    }
+
     while (normalized.Contains(@"\\", StringComparison.Ordinal))
     {
         normalized = normalized.Replace(@"\\", @"\");
@@ -1650,6 +1869,16 @@ static string NormalizeRecoveryPath(string? path)
     }
 
     return normalized;
+}
+
+static bool IsKnownRecoveryFolderToken(string path)
+{
+    return path.Equals("%FMD_DESKTOP%", StringComparison.OrdinalIgnoreCase) ||
+           path.Equals("%FMD_DOCUMENTS%", StringComparison.OrdinalIgnoreCase) ||
+           path.Equals("%FMD_DOWNLOADS%", StringComparison.OrdinalIgnoreCase) ||
+           path.Equals("%FMD_PICTURES%", StringComparison.OrdinalIgnoreCase) ||
+           path.Equals("%FMD_VIDEOS%", StringComparison.OrdinalIgnoreCase) ||
+           path.Equals("%FMD_MUSIC%", StringComparison.OrdinalIgnoreCase);
 }
 
 static string ToIsoString(object? value)
@@ -1769,6 +1998,15 @@ record RecoveryFileListRequest(
     string? DeviceId,
     string? DeviceName,
     List<RecoveryFileRecord>? Entries);
+
+record RecoveryInventoryResponse(
+    string DeviceId,
+    string DeviceName,
+    bool Enabled,
+    List<RecoveryApprovedLocationRecord> ApprovedLocations,
+    int TotalFiles,
+    string LastScanTime,
+    List<RecoveryFileRecord> Files);
 
 record RecoveryFileRecord(
     string? FileName,

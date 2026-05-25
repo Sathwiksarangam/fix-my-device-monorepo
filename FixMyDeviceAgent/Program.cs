@@ -5,10 +5,10 @@ using System.Text.Json.Nodes;
 using FixMyDeviceAgent.Models;
 using FixMyDeviceAgent.Services;
 
-const string BackendBaseUrl = "https://fix-my-device-backend-uuu6.onrender.com";
+const string BackendBaseUrl = "https://fix-my-device-backend.onrender.com";
 const string DeviceInfoEndpoint = "/api/devices/system-info-by-code";
 const string RecoverySettingsEndpoint = "/api/recovery/settings";
-const string RecoveryFileListEndpoint = "/api/recovery/file-list";
+const string RecoveryUploadEndpoint = "/api/recovery/upload";
 const string ConfigDirectoryName = "Fix My Device Agent";
 const string AgentConfigFileName = "agent-config.json";
 const string RecoveryConfigFileName = "recovery-config.json";
@@ -102,31 +102,43 @@ static async Task RunSetupModeAsync(
     string recoveryConfigPath,
     JsonSerializerOptions jsonOptions)
 {
-    var existingConfig = await LoadConfigAsync(agentConfigPath);
-    var config = await ChooseSetupCodeFlowAsync(agentConfigPath, existingConfig, forcePrompt: true);
-    if (config is null)
+    while (true)
     {
-        Console.WriteLine("Setup was cancelled.");
-        return;
-    }
+        var existingConfig = await LoadConfigAsync(agentConfigPath);
+        var config = await ChooseSetupCodeFlowAsync(agentConfigPath, existingConfig, forcePrompt: true);
+        if (config is null)
+        {
+            Console.WriteLine("Setup was cancelled.");
+            return;
+        }
 
-    var existingRecoveryConfig = await LoadRecoveryConfigAsync(recoveryConfigPath);
-    var recoveryConfig = await ChooseRecoverySetupFlowAsync(recoveryConfigPath, recoveryService, existingRecoveryConfig, forcePrompt: true);
+        var existingRecoveryConfig = await LoadRecoveryConfigAsync(recoveryConfigPath);
+        var recoveryConfig = await ChooseRecoverySetupFlowAsync(recoveryConfigPath, recoveryService, existingRecoveryConfig, forcePrompt: true);
 
-    var syncResult = await PerformSyncAsync(
-        client,
-        deviceInfoService,
-        recoveryService,
-        config,
-        recoveryConfig,
-        agentConfigPath,
-        jsonOptions,
-        isManual: true);
+        var syncResult = await PerformSyncAsync(
+            client,
+            deviceInfoService,
+            recoveryService,
+            config,
+            recoveryConfig,
+            agentConfigPath,
+            jsonOptions,
+            isManual: true);
 
-    if (syncResult == SyncOutcome.Success)
-    {
+        if (syncResult == SyncOutcome.Success)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Agent setup is complete. Background sync will run when you sign in.");
+            return;
+        }
+
+        if (syncResult != SyncOutcome.Unauthorized)
+        {
+            return;
+        }
+
         Console.WriteLine();
-        Console.WriteLine("Agent setup is complete. Background sync will run when you sign in.");
+        Console.WriteLine("That setup code is invalid. The saved config was cleared. Please enter a valid Agent Setup Code.");
     }
 }
 
@@ -339,7 +351,7 @@ static async Task<SyncOutcome> PerformSyncAsync(
 
     var recoveryFileListResult = await SendPostAsync(
         client,
-        $"{BackendBaseUrl}{RecoveryFileListEndpoint}",
+        $"{BackendBaseUrl}{RecoveryUploadEndpoint}",
         recoveryFileListPayload.ToJsonString(jsonOptions),
         isManual);
 

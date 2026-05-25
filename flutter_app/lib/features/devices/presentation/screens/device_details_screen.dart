@@ -9,6 +9,7 @@ import '../../../../core/widgets/info_card.dart';
 import '../../../../core/widgets/status_chip.dart';
 import '../../data/models/device.dart';
 import '../../data/services/api_device_service.dart';
+import '../../../files/data/models/recovery_models.dart';
 
 class DeviceDetailsScreen extends StatelessWidget {
   const DeviceDetailsScreen({
@@ -175,16 +176,93 @@ class DeviceDetailsScreen extends StatelessWidget {
 
               const SizedBox(height: 20),
 
+              const Text(
+                'Emergency Recovery',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+
+              const SizedBox(height: 12),
+
+              FutureBuilder<RecoveryInventory>(
+                future: ApiDeviceService().getRecoveryInventory('${device['id']}'),
+                builder: (context, recoverySnapshot) {
+                  final RecoveryInventory? inventory = recoverySnapshot.data;
+                  final bool isLoadingRecovery =
+                      recoverySnapshot.connectionState == ConnectionState.waiting;
+                  final bool hasRecoveryError = recoverySnapshot.hasError;
+                  final String lastScanTime =
+                      inventory?.lastScanTime.isNotEmpty == true
+                          ? inventory!.lastScanTime
+                          : 'Not scanned yet';
+                  final String totalFiles = inventory?.totalFiles.toString() ?? '0';
+                  final String recoveryStatus = inventory?.enabled == true
+                      ? 'Enabled'
+                      : 'Not Enabled';
+
+                  return Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (isLoadingRecovery)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Center(child: CircularProgressIndicator()),
+                            )
+                          else if (hasRecoveryError)
+                            Text(
+                              'Could not load Emergency Recovery right now.\n${recoverySnapshot.error}',
+                            )
+                          else ...[
+                            DeviceDetailRow(
+                              label: 'Emergency Recovery',
+                              value: recoveryStatus,
+                            ),
+                            DeviceDetailRow(
+                              label: 'Total Files',
+                              value: totalFiles,
+                            ),
+                            DeviceDetailRow(
+                              label: 'Last Scan Time',
+                              value: lastScanTime,
+                            ),
+                          ],
+                          const SizedBox(height: 14),
+                          Wrap(
+                            spacing: 12,
+                            runSpacing: 12,
+                            children: [
+                              ActionButton(
+                                label: 'Browse Recovery Files',
+                                icon: Icons.folder_open_rounded,
+                                onPressed: () => context.go(
+                                  '${AppRoutes.emergencyRecovery}?id=${device['id']}',
+                                ),
+                              ),
+                              ActionButton(
+                                label: 'Configure Recovery',
+                                icon: Icons.health_and_safety_rounded,
+                                onPressed: () => context.go(
+                                  '${AppRoutes.emergencyRecovery}?id=${device['id']}',
+                                ),
+                                isPrimary: false,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+              const SizedBox(height: 20),
+
               Wrap(
                 spacing: 12,
                 runSpacing: 12,
                 children: [
-                  ActionButton(
-                    label: 'Emergency Recovery',
-                    icon: Icons.health_and_safety_rounded,
-                    onPressed: () => context.go(
-                        '${AppRoutes.emergencyRecovery}?id=${device['id']}'),
-                  ),
                   ActionButton(
                     label: 'Transfer Files',
                     icon: Icons.upload_file,
