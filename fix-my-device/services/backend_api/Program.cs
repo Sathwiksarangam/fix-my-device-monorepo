@@ -361,24 +361,32 @@ app.MapGet("/api/devices", async (HttpRequest request) =>
 
 app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest request) =>
 {
-    if (request is null)
-    {
-        return Results.BadRequest(new { message = "Device payload is required." });
-    }
-
-    var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
-    if (!IsValidSetupCode(setupCode))
-    {
-        return Results.BadRequest(new { message = "Agent setup code format is invalid." });
-    }
-
-    if (!TryValidateDevicePayload(request, out var validationMessage))
-    {
-        return Results.BadRequest(new { message = validationMessage });
-    }
-
     try
     {
+        if (request is null)
+        {
+            return Results.BadRequest(new { message = "Device payload is required." });
+        }
+
+        var rawSetupCode = request.SetupCode ?? request.AgentSetupCode;
+        if (string.IsNullOrWhiteSpace(rawSetupCode))
+        {
+            return Results.BadRequest(new { message = "Setup code is required." });
+        }
+
+        var setupCode = NormalizeSetupCode(rawSetupCode);
+        if (!IsValidSetupCode(setupCode))
+        {
+            return Results.Json(
+                new { message = "Invalid setup code." },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        if (!TryValidateDevicePayload(request, out var validationMessage))
+        {
+            return Results.BadRequest(new { message = validationMessage });
+        }
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
 
@@ -395,7 +403,9 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
         var userResult = await userCommand.ExecuteScalarAsync();
         if (userResult is not Guid userId)
         {
-            return Results.Unauthorized();
+            return Results.Json(
+                new { message = "Invalid setup code." },
+                statusCode: StatusCodes.Status401Unauthorized);
         }
 
         var normalizedDeviceId = NormalizeOptionalValue(request.DeviceId, 128);
@@ -539,10 +549,14 @@ app.MapPost("/api/devices/system-info-by-code", async (DeviceSystemInfoRequest r
     }
     catch (Exception ex)
     {
-        Console.WriteLine("System info save failed:");
-        Console.WriteLine(ex);
+        Console.Error.WriteLine("System info save failed:");
+        Console.Error.WriteLine(ex);
         return Results.Json(
-            new { message = "Failed to save device info." },
+            new
+            {
+                message = "Device sync failed",
+                error = ex.ToString(),
+            },
             statusCode: StatusCodes.Status500InternalServerError);
     }
 });
