@@ -27,7 +27,6 @@ public sealed class AgentTrayApplicationContext : ApplicationContext
         var contextMenuStrip = new ContextMenuStrip();
         contextMenuStrip.Items.Add("Sync Now", null, async (_, _) => await RunSyncNowAsync());
         contextMenuStrip.Items.Add("Open Dashboard", null, (_, _) => _runtimeService.OpenDashboard());
-        contextMenuStrip.Items.Add("Open Backup Folder", null, (_, _) => _runtimeService.OpenBackupFolder());
         contextMenuStrip.Items.Add("Reconnect Agent", null, async (_, _) => await ReconnectAgentAsync());
         contextMenuStrip.Items.Add(new ToolStripSeparator());
         contextMenuStrip.Items.Add("Exit", null, (_, _) => ExitAgent());

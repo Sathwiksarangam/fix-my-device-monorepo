@@ -91,7 +91,6 @@ internal static class Program
             Console.WriteLine("4. Reconnect / enter new setup code");
             Console.WriteLine("5. Reset agent");
             Console.WriteLine("6. Exit");
-            Console.WriteLine("7. Open Backup Folder");
             Console.WriteLine();
             Console.Write("Choose an option: ");
 
@@ -116,15 +115,9 @@ internal static class Program
                     break;
                 case "6":
                     return;
-                case "7":
-                    runtime.OpenBackupFolder();
-                    Console.WriteLine();
-                    Console.WriteLine($"Backup folder: {runtime.BackupDirectoryPath}");
-                    PressEnterToContinue();
-                    break;
                 default:
                     Console.WriteLine();
-                    Console.WriteLine("Please choose 1, 2, 3, 4, 5, 6, or 7.");
+                    Console.WriteLine("Please choose 1, 2, 3, 4, 5, or 6.");
                     PressEnterToContinue();
                     break;
             }

@@ -71,8 +71,23 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
   }
 
   Future<void> _downloadAgent() async {
+    final String installerUrl =
+        ApiDeviceService.agentInstallerDownloadUrl.trim();
+    if (installerUrl.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Installer download is not configured yet.'),
+        ),
+      );
+      return;
+    }
+
     final bool launched = await launchUrl(
-      Uri.parse(ApiDeviceService.agentDownloadUrl),
+      Uri.parse(installerUrl),
       webOnlyWindowName: '_self',
     );
 
@@ -81,9 +96,9 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
+      const SnackBar(
         content: Text(
-          'Could not open the installer download. Try ${ApiDeviceService.agentDownloadUrl}. If your backend cannot serve the installer file directly, configure an external installer URL and rebuild the app.',
+          'Installer download is not configured yet.',
         ),
       ),
     );

@@ -9,12 +9,8 @@ import '../../../files/data/models/recovery_models.dart';
 
 class ApiDeviceService {
   static const String baseUrl = 'https://fix-my-device-monorepo.onrender.com';
-  static const String agentDownloadUrl =
-      String.fromEnvironment(
-        'FMD_AGENT_DOWNLOAD_URL',
-        defaultValue:
-            'https://fix-my-device-monorepo.onrender.com/downloads/FixMyDeviceSetup.exe',
-      );
+  static const String agentInstallerDownloadUrl =
+      String.fromEnvironment('FMD_AGENT_INSTALLER_URL', defaultValue: '');
   static const String resetAgentCommand =
       r'Remove-Item "$env:APPDATA\Fix My Device Agent\agent-config.json" -Force -ErrorAction SilentlyContinue';
 

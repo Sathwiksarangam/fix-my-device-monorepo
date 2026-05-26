@@ -1,8 +1,5 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:file_selector/file_selector.dart';
 
 import '../../../../app/router/app_router.dart';
 import '../../../../core/layouts/app_scaffold.dart';
@@ -261,12 +258,11 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       return;
     }
 
-    try {
-      if (selectedPaths.length == 1) {
-        await _downloadSingleRecoveryFile(deviceId, selectedPaths.first);
-        return;
-      }
+    setState(() {
+      _isDownloading = true;
+    });
 
+    try {
       for (final String path in selectedPaths) {
         await ApiDeviceService().requestRecoveryDownload(
           deviceId: deviceId,
@@ -282,8 +278,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
         SnackBar(
           content: Text(
             selectedPaths.length == 1
-                ? 'Download request created. Check File Transfer for status.'
-                : '${selectedPaths.length} download requests created. Check File Transfer for status.',
+                ? 'Download request created. Open File Transfer when the job shows Ready.'
+                : '${selectedPaths.length} download requests created. Open File Transfer when the jobs show Ready.',
           ),
         ),
       );
@@ -294,62 +290,6 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(error.toString())),
-      );
-    }
-  }
-
-  Future<void> _downloadSingleRecoveryFile(String deviceId, String filePath) async {
-    setState(() {
-      _isDownloading = true;
-    });
-
-    try {
-      final ApiDeviceService api = ApiDeviceService();
-      await api.requestRecoveryDownload(deviceId: deviceId, filePath: filePath);
-
-      final TransferJob? job = await api.waitForCompletedDownloadJob(
-        deviceId: deviceId,
-        filePath: filePath,
-      );
-
-      if (job == null) {
-        throw Exception(
-          'The download request is still pending. The agent may still be syncing. Check File Transfer for status.',
-        );
-      }
-
-      if (job.isFailed) {
-        throw Exception(
-          job.errorMessage.isEmpty
-              ? 'The device could not provide that file.'
-              : job.errorMessage,
-        );
-      }
-
-      final TransferDownload download = await api.downloadTransferFile(job.id);
-      final FileSaveLocation? location = await getSaveLocation(
-        suggestedName: download.fileName,
-      );
-
-      if (location == null) {
-        return;
-      }
-
-      final XFile file = XFile.fromData(
-        Uint8List.fromList(download.bytes),
-        name: download.fileName,
-        mimeType: 'application/octet-stream',
-      );
-      await file.saveTo(location.path);
-
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Recovery file downloaded successfully.'),
-        ),
       );
     } finally {
       if (mounted) {
@@ -600,7 +540,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
             ),
             const SizedBox(height: 12),
             const Text(
-              'File transfer is coming next. This version prepares the recovery file list only.',
+              'Select approved folders, sync them from the agent, then queue secure downloads from the recovery browser.',
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -843,14 +783,12 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                   OutlinedButton.icon(
                     onPressed: _isDownloading ? null : _requestSelectedDownloads,
                     icon: const Icon(Icons.download_rounded),
-                    label: Text(
-                      _isDownloading
-                          ? 'Downloading...'
-                          : _selectedDownloadablePaths.length == 1
-                              ? 'Download'
-                              : 'Download Selected',
-                    ),
-                  ),
+               label: Text(
+                 _isDownloading
+                      ? 'Queueing...'
+                      : 'Download Selected',
+                ),
+              ),
               ],
             ),
             const SizedBox(height: 16),
@@ -959,13 +897,13 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  available
-                                      ? rootChoice.detail
-                                      : '${rootChoice.detail} (not synced yet)',
+                                  rootChoice.detail,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                        color: Colors.black54,
+                                        color: rootChoice.isSynced
+                                            ? Colors.black54
+                                            : const Color(0xFF9A6700),
                                       ),
                                 ),
                               ],
@@ -989,6 +927,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   ) {
     final List<RecoveryApprovedLocation> approvedLocations =
         settings?.approvedLocations ?? const <RecoveryApprovedLocation>[];
+    final bool inventorySynced = (settings?.lastSyncedAt ?? '').isNotEmpty;
 
     if (approvedLocations.isEmpty) {
       return explorer.roots
@@ -997,51 +936,104 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
               label: node.name,
               detail: node.fullPath,
               targetPath: node.fullPath,
+              isSynced: true,
             ),
           )
           .toList();
     }
 
     return approvedLocations
-        .map((_resolveRootChoice(explorer)))
+        .map((_resolveRootChoice(explorer, inventorySynced)))
         .toList();
   }
 
   _ResolvedRootChoice Function(RecoveryApprovedLocation) _resolveRootChoice(
     _RecoveryExplorerModel explorer,
+    bool inventorySynced,
   ) {
     return (RecoveryApprovedLocation location) {
       final String normalizedPath = _RecoveryExplorerModel.normalizePathForUi(location.fullPath);
       _ExplorerNode? matchedNode;
 
-      if (normalizedPath.isNotEmpty) {
-        matchedNode = explorer.roots.cast<_ExplorerNode?>().firstWhere(
-              (_ExplorerNode? node) =>
-                  node != null &&
-                  (node.fullPath == normalizedPath ||
-                      node.fullPath.startsWith(normalizedPath) ||
-                      normalizedPath.startsWith(node.fullPath)),
-              orElse: () => null,
-            );
+      matchedNode = _matchExplorerRoot(explorer, location, normalizedPath);
+
+      if (matchedNode != null) {
+        return _ResolvedRootChoice(
+          label: location.label,
+          detail: matchedNode.fullPath,
+          targetPath: matchedNode.fullPath,
+          isSynced: true,
+        );
       }
-
-      matchedNode ??= explorer.roots.cast<_ExplorerNode?>().firstWhere(
-            (_ExplorerNode? node) =>
-                node != null &&
-                node.name.toLowerCase() == location.label.toLowerCase(),
-            orElse: () => null,
-          );
-
-      final String detail = matchedNode?.fullPath.isNotEmpty == true
-          ? matchedNode!.fullPath
-          : _describeLocationPath(location);
 
       return _ResolvedRootChoice(
         label: location.label,
-        detail: detail,
-        targetPath: matchedNode?.fullPath ?? '',
+        detail: inventorySynced
+            ? 'Synced, no files found'
+            : 'Run the agent sync to load this folder',
+        targetPath: '',
+        isSynced: inventorySynced,
       );
     };
+  }
+
+  _ExplorerNode? _matchExplorerRoot(
+    _RecoveryExplorerModel explorer,
+    RecoveryApprovedLocation location,
+    String normalizedPath,
+  ) {
+    if (normalizedPath.isNotEmpty) {
+      final _ExplorerNode? exactMatch = explorer.roots.cast<_ExplorerNode?>().firstWhere(
+            (_ExplorerNode? node) =>
+                node != null &&
+                (node.fullPath == normalizedPath ||
+                    node.fullPath.startsWith(normalizedPath) ||
+                    normalizedPath.startsWith(node.fullPath)),
+            orElse: () => null,
+          );
+      if (exactMatch != null) {
+        return exactMatch;
+      }
+    }
+
+    final String tokenRootLabel = _rootLabelForToken(location.fullPath);
+    if (tokenRootLabel.isNotEmpty) {
+      final _ExplorerNode? tokenMatch = explorer.roots.cast<_ExplorerNode?>().firstWhere(
+            (_ExplorerNode? node) =>
+                node != null &&
+                node.name.toLowerCase() == tokenRootLabel.toLowerCase(),
+            orElse: () => null,
+          );
+      if (tokenMatch != null) {
+        return tokenMatch;
+      }
+    }
+
+    return explorer.roots.cast<_ExplorerNode?>().firstWhere(
+          (_ExplorerNode? node) =>
+              node != null &&
+              node.name.toLowerCase() == location.label.toLowerCase(),
+          orElse: () => null,
+        );
+  }
+
+  String _rootLabelForToken(String path) {
+    switch (path) {
+      case '%FMD_DESKTOP%':
+        return 'Desktop';
+      case '%FMD_DOCUMENTS%':
+        return 'Documents';
+      case '%FMD_DOWNLOADS%':
+        return 'Downloads';
+      case '%FMD_PICTURES%':
+        return 'Pictures';
+      case '%FMD_VIDEOS%':
+        return 'Videos';
+      case '%FMD_MUSIC%':
+        return 'Music';
+      default:
+        return '';
+    }
   }
 
   Widget _buildBrowserPane(
@@ -1789,11 +1781,13 @@ class _ResolvedRootChoice {
     required this.label,
     required this.detail,
     required this.targetPath,
+    required this.isSynced,
   });
 
   final String label;
   final String detail;
   final String targetPath;
+  final bool isSynced;
 }
 
 class _ExplorerNode {

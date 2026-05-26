@@ -216,6 +216,16 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
         mimeType: 'application/octet-stream',
       );
       await file.saveTo(location.path);
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Transfer downloaded successfully.'),
+        ),
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -240,6 +250,18 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
     final DateTime local = parsed.toLocal();
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')} '
         '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _displayTransferStatus(TransferJob job) {
+    if (job.jobType == 'download_from_device' && job.isCompleted) {
+      return 'Ready';
+    }
+
+    if (job.status == 'InProgress') {
+      return 'In Progress';
+    }
+
+    return job.status;
   }
 
   @override
@@ -499,23 +521,54 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Row(
-                        children: <Widget>[
-                          Expanded(
-                            child: Text(
-                              'Transfer History',
-                              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                    fontWeight: FontWeight.w800,
+                      LayoutBuilder(
+                        builder: (BuildContext context, BoxConstraints constraints) {
+                          final bool stackedHeader = constraints.maxWidth < 760;
+
+                          if (stackedHeader) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text(
+                                  'Transfer History',
+                                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                ),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: ActionButton(
+                                    label: 'Refresh',
+                                    icon: Icons.refresh_rounded,
+                                    onPressed: _refresh,
+                                    isPrimary: false,
                                   ),
-                            ),
-                          ),
-                          ActionButton(
-                            label: 'Refresh',
-                            icon: Icons.refresh_rounded,
-                            onPressed: _refresh,
-                            isPrimary: false,
-                          ),
-                        ],
+                                ),
+                              ],
+                            );
+                          }
+
+                          return Row(
+                            children: <Widget>[
+                              Expanded(
+                                child: Text(
+                                  'Transfer History',
+                                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              ActionButton(
+                                label: 'Refresh',
+                                icon: Icons.refresh_rounded,
+                                onPressed: _refresh,
+                                isPrimary: false,
+                              ),
+                            ],
+                          );
+                        },
                       ),
                       const SizedBox(height: 12),
                       if (pageData.transferHistory.isEmpty)
@@ -524,6 +577,7 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                         ...pageData.transferHistory.map((TransferJob job) {
                           final bool canDownload =
                               job.jobType == 'download_from_device' && job.isCompleted;
+                          final String statusLabel = _displayTransferStatus(job);
 
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 12),
@@ -537,25 +591,68 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: <Widget>[
-                                  Row(
-                                    children: <Widget>[
-                                      Expanded(
-                                        child: Text(
-                                          job.requestedFileName.isNotEmpty
-                                              ? job.requestedFileName
-                                              : job.storageFileName,
-                                          style: const TextStyle(fontWeight: FontWeight.w700),
+                                  LayoutBuilder(
+                                    builder: (BuildContext context, BoxConstraints constraints) {
+                                      final Widget title = Text(
+                                        job.requestedFileName.isNotEmpty
+                                            ? job.requestedFileName
+                                            : job.storageFileName,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontWeight: FontWeight.w700),
+                                      );
+                                      final Widget statusChip = Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
                                         ),
-                                      ),
-                                      Text(job.status),
-                                    ],
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFEFF6FF),
+                                          borderRadius: BorderRadius.circular(999),
+                                        ),
+                                        child: Text(
+                                          statusLabel,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF0F4C81),
+                                          ),
+                                        ),
+                                      );
+
+                                      if (constraints.maxWidth < 620) {
+                                        return Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: <Widget>[
+                                            title,
+                                            const SizedBox(height: 8),
+                                            statusChip,
+                                          ],
+                                        );
+                                      }
+
+                                      return Row(
+                                        children: <Widget>[
+                                          Expanded(child: title),
+                                          const SizedBox(width: 12),
+                                          statusChip,
+                                        ],
+                                      );
+                                    },
                                   ),
                                   const SizedBox(height: 6),
                                   Text('Type: ${job.jobType}'),
                                   if (job.requestedFilePath.isNotEmpty)
-                                    Text('Source: ${job.requestedFilePath}'),
+                                    Text(
+                                      'Source: ${job.requestedFilePath}',
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                   if (job.destinationPath.isNotEmpty)
-                                    Text('Destination: ${job.destinationPath}'),
+                                    Text(
+                                      'Destination: ${job.destinationPath}',
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                   Text('Updated: ${_formatTimestamp(job.updatedAt)}'),
                                   if (job.errorMessage.isNotEmpty)
                                     Text(
@@ -565,7 +662,7 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                                   if (canDownload) ...<Widget>[
                                     const SizedBox(height: 10),
                                     ActionButton(
-                                      label: 'Download Completed File',
+                                      label: 'Download Now',
                                       icon: Icons.download_for_offline_rounded,
                                       onPressed: () => _downloadCompletedTransfer(job.id),
                                     ),
