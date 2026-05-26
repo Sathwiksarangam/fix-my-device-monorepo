@@ -579,6 +579,27 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        'USB Recovery Mode coming soon',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'If the damaged laptop is powered on and the agent is running, files can already be recovered through cloud transfer. Direct USB-to-phone or USB-to-laptop recovery will need a separate USB bridge or companion app later.',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           );
         },

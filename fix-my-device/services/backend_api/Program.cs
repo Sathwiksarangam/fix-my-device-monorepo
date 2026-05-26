@@ -39,6 +39,8 @@ if (string.IsNullOrWhiteSpace(connectionString))
 
 var transferStorageRoot = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "transfer-storage");
 Directory.CreateDirectory(transferStorageRoot);
+var agentInstallerExternalUrl = Environment.GetEnvironmentVariable("AGENT_INSTALLER_EXTERNAL_URL");
+var agentInstallerPath = Path.Combine(builder.Environment.ContentRootPath, "downloads", "FixMyDeviceSetup.exe");
 await EnsureTransferTablesAsync(connectionString);
 
 var app = builder.Build();
@@ -66,6 +68,27 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseCors("AllowFlutterApp");
 
 app.MapGet("/", () => "Fix My Device API is running");
+
+app.MapGet("/downloads/FixMyDeviceSetup.exe", () =>
+{
+    if (File.Exists(agentInstallerPath))
+    {
+        return Results.File(
+            agentInstallerPath,
+            "application/octet-stream",
+            "FixMyDeviceSetup.exe");
+    }
+
+    if (!string.IsNullOrWhiteSpace(agentInstallerExternalUrl))
+    {
+        return Results.Redirect(agentInstallerExternalUrl, permanent: false);
+    }
+
+    return Results.Text(
+        "FixMyDeviceSetup.exe is not available on this server yet. Configure AGENT_INSTALLER_EXTERNAL_URL or place the installer in the backend downloads folder.",
+        "text/plain",
+        statusCode: StatusCodes.Status404NotFound);
+});
 
 app.MapGet("/api/debug/db-check", async () =>
 {

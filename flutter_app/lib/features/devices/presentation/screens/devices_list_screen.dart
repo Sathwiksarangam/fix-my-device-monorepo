@@ -82,7 +82,9 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Could not open ${ApiDeviceService.agentDownloadUrl}'),
+        content: Text(
+          'Could not open the installer download. Try ${ApiDeviceService.agentDownloadUrl}. If your backend cannot serve the installer file directly, configure an external installer URL and rebuild the app.',
+        ),
       ),
     );
   }

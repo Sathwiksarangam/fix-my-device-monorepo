@@ -10,7 +10,11 @@ import '../../../files/data/models/recovery_models.dart';
 class ApiDeviceService {
   static const String baseUrl = 'https://fix-my-device-monorepo.onrender.com';
   static const String agentDownloadUrl =
-      'https://fix-my-device-monorepo.onrender.com/downloads/FixMyDeviceAgent.exe';
+      String.fromEnvironment(
+        'FMD_AGENT_DOWNLOAD_URL',
+        defaultValue:
+            'https://fix-my-device-monorepo.onrender.com/downloads/FixMyDeviceSetup.exe',
+      );
   static const String resetAgentCommand =
       r'Remove-Item "$env:APPDATA\Fix My Device Agent\agent-config.json" -Force -ErrorAction SilentlyContinue';
 
@@ -307,6 +311,35 @@ class ApiDeviceService {
     final String fileName = match?.group(1) ?? 'FixMyDeviceDownload.bin';
 
     return TransferDownload(fileName: fileName, bytes: response.bodyBytes);
+  }
+
+  Future<TransferJob?> waitForCompletedDownloadJob({
+    required String deviceId,
+    required String filePath,
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    final DateTime startedAt = DateTime.now();
+
+    while (DateTime.now().difference(startedAt) < timeout) {
+      final List<TransferJob> jobs = await getTransferHistory(deviceId);
+      for (final TransferJob job in jobs) {
+        if (job.jobType != 'download_from_device') {
+          continue;
+        }
+
+        if (job.requestedFilePath != filePath) {
+          continue;
+        }
+
+        if (job.isCompleted || job.isFailed) {
+          return job;
+        }
+      }
+
+      await Future<void>.delayed(const Duration(seconds: 3));
+    }
+
+    return null;
   }
 
   String _extractErrorMessage(

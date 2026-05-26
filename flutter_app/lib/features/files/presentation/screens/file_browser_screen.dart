@@ -1,5 +1,8 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:file_selector/file_selector.dart';
 
 import '../../../../app/router/app_router.dart';
 import '../../../../core/layouts/app_scaffold.dart';
@@ -67,6 +70,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   String? _draftDeviceId;
   String _draftDeviceName = '';
   bool _isSaving = false;
+  bool _isDownloading = false;
   List<RecoveryApprovedLocation> _draftLocations = <RecoveryApprovedLocation>[];
   Map<String, bool> _draftSelections = <String, bool>{};
   String? _currentRootPath;
@@ -258,6 +262,11 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     }
 
     try {
+      if (selectedPaths.length == 1) {
+        await _downloadSingleRecoveryFile(deviceId, selectedPaths.first);
+        return;
+      }
+
       for (final String path in selectedPaths) {
         await ApiDeviceService().requestRecoveryDownload(
           deviceId: deviceId,
@@ -286,6 +295,68 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(error.toString())),
       );
+    }
+  }
+
+  Future<void> _downloadSingleRecoveryFile(String deviceId, String filePath) async {
+    setState(() {
+      _isDownloading = true;
+    });
+
+    try {
+      final ApiDeviceService api = ApiDeviceService();
+      await api.requestRecoveryDownload(deviceId: deviceId, filePath: filePath);
+
+      final TransferJob? job = await api.waitForCompletedDownloadJob(
+        deviceId: deviceId,
+        filePath: filePath,
+      );
+
+      if (job == null) {
+        throw Exception(
+          'The download request is still pending. The agent may still be syncing. Check File Transfer for status.',
+        );
+      }
+
+      if (job.isFailed) {
+        throw Exception(
+          job.errorMessage.isEmpty
+              ? 'The device could not provide that file.'
+              : job.errorMessage,
+        );
+      }
+
+      final TransferDownload download = await api.downloadTransferFile(job.id);
+      final FileSaveLocation? location = await getSaveLocation(
+        suggestedName: download.fileName,
+      );
+
+      if (location == null) {
+        return;
+      }
+
+      final XFile file = XFile.fromData(
+        Uint8List.fromList(download.bytes),
+        name: download.fileName,
+        mimeType: 'application/octet-stream',
+      );
+      await file.saveTo(location.path);
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Recovery file downloaded successfully.'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isDownloading = false;
+        });
+      }
     }
   }
 
@@ -652,6 +723,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   Widget _buildExplorerCard(
     BuildContext context,
     _RecoveryExplorerModel explorer,
+    RecoverySettings? settings,
     List<RecoveryFileEntry> files,
   ) {
     final List<_ExplorerNode> visibleChildren = _visibleChildren(explorer);
@@ -769,12 +841,14 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                 ),
                 if (_selectedDownloadablePaths.isNotEmpty)
                   OutlinedButton.icon(
-                    onPressed: _requestSelectedDownloads,
+                    onPressed: _isDownloading ? null : _requestSelectedDownloads,
                     icon: const Icon(Icons.download_rounded),
                     label: Text(
-                      _selectedDownloadablePaths.length == 1
-                          ? 'Download'
-                          : 'Download Selected',
+                      _isDownloading
+                          ? 'Downloading...'
+                          : _selectedDownloadablePaths.length == 1
+                              ? 'Download'
+                              : 'Download Selected',
                     ),
                   ),
               ],
@@ -783,7 +857,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
             LayoutBuilder(
               builder: (BuildContext context, BoxConstraints constraints) {
                 final bool stacked = constraints.maxWidth < 980;
-                final Widget rootsPane = _buildRootPane(context, explorer);
+                final Widget rootsPane = _buildRootPane(context, explorer, settings);
                 final Widget browserPane = _buildBrowserPane(
                   context,
                   explorer,
@@ -817,7 +891,14 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     );
   }
 
-  Widget _buildRootPane(BuildContext context, _RecoveryExplorerModel explorer) {
+  Widget _buildRootPane(
+    BuildContext context,
+    _RecoveryExplorerModel explorer,
+    RecoverySettings? settings,
+  ) {
+    final List<_ResolvedRootChoice> resolvedRoots =
+        _buildResolvedRoots(explorer, settings);
+
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFFF8FAFC),
@@ -835,11 +916,12 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                 ),
           ),
           const SizedBox(height: 10),
-          if (explorer.roots.isEmpty)
+          if (resolvedRoots.isEmpty)
             const Text('No synced folders yet.')
           else
-            ...explorer.roots.map((_ExplorerNode rootNode) {
-              final bool selected = rootNode.fullPath == _currentRootPath;
+            ...resolvedRoots.map((_ResolvedRootChoice rootChoice) {
+              final bool selected = rootChoice.targetPath == _currentRootPath;
+              final bool available = rootChoice.targetPath.isNotEmpty;
               return Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Material(
@@ -849,18 +931,20 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                   borderRadius: BorderRadius.circular(14),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(14),
-                    onTap: () => _openRoot(rootNode.fullPath),
+                    onTap: available ? () => _openRoot(rootChoice.targetPath) : null,
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                       child: Row(
                         children: <Widget>[
                           Icon(
-                            rootNode.fullPath.toUpperCase().startsWith('C:\\')
+                            rootChoice.detail.toUpperCase().startsWith('C:\\')
                                 ? Icons.folder_special_rounded
                                 : Icons.storage_rounded,
                             color: selected
                                 ? Theme.of(context).colorScheme.primary
-                                : const Color(0xFF486581),
+                                : available
+                                    ? const Color(0xFF486581)
+                                    : const Color(0xFF9AA5B1),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -868,14 +952,16 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
                                 Text(
-                                  rootNode.name,
+                                  rootChoice.label,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(fontWeight: FontWeight.w700),
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  rootNode.fullPath,
+                                  available
+                                      ? rootChoice.detail
+                                      : '${rootChoice.detail} (not synced yet)',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -895,6 +981,67 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
         ],
       ),
     );
+  }
+
+  List<_ResolvedRootChoice> _buildResolvedRoots(
+    _RecoveryExplorerModel explorer,
+    RecoverySettings? settings,
+  ) {
+    final List<RecoveryApprovedLocation> approvedLocations =
+        settings?.approvedLocations ?? const <RecoveryApprovedLocation>[];
+
+    if (approvedLocations.isEmpty) {
+      return explorer.roots
+          .map(
+            (_ExplorerNode node) => _ResolvedRootChoice(
+              label: node.name,
+              detail: node.fullPath,
+              targetPath: node.fullPath,
+            ),
+          )
+          .toList();
+    }
+
+    return approvedLocations
+        .map((_resolveRootChoice(explorer)))
+        .toList();
+  }
+
+  _ResolvedRootChoice Function(RecoveryApprovedLocation) _resolveRootChoice(
+    _RecoveryExplorerModel explorer,
+  ) {
+    return (RecoveryApprovedLocation location) {
+      final String normalizedPath = _RecoveryExplorerModel.normalizePathForUi(location.fullPath);
+      _ExplorerNode? matchedNode;
+
+      if (normalizedPath.isNotEmpty) {
+        matchedNode = explorer.roots.cast<_ExplorerNode?>().firstWhere(
+              (_ExplorerNode? node) =>
+                  node != null &&
+                  (node.fullPath == normalizedPath ||
+                      node.fullPath.startsWith(normalizedPath) ||
+                      normalizedPath.startsWith(node.fullPath)),
+              orElse: () => null,
+            );
+      }
+
+      matchedNode ??= explorer.roots.cast<_ExplorerNode?>().firstWhere(
+            (_ExplorerNode? node) =>
+                node != null &&
+                node.name.toLowerCase() == location.label.toLowerCase(),
+            orElse: () => null,
+          );
+
+      final String detail = matchedNode?.fullPath.isNotEmpty == true
+          ? matchedNode!.fullPath
+          : _describeLocationPath(location);
+
+      return _ResolvedRootChoice(
+        label: location.label,
+        detail: detail,
+        targetPath: matchedNode?.fullPath ?? '',
+      );
+    };
   }
 
   Widget _buildBrowserPane(
@@ -1162,7 +1309,12 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
               const SizedBox(height: 16),
               _buildSelectableLocationsCard(context),
               const SizedBox(height: 16),
-              _buildExplorerCard(context, explorer, pageData.files),
+              _buildExplorerCard(
+                context,
+                explorer,
+                pageData.settings,
+                pageData.files,
+              ),
             ],
           );
         },
@@ -1591,6 +1743,8 @@ class _RecoveryExplorerModel {
     return normalized;
   }
 
+  static String normalizePathForUi(String path) => _normalizePath(path);
+
   static String _typeLabel(bool isDirectory, String extension) {
     if (isDirectory) {
       return 'Folder';
@@ -1628,6 +1782,18 @@ class _RecoveryExplorerModel {
 
     return 'Unknown';
   }
+}
+
+class _ResolvedRootChoice {
+  const _ResolvedRootChoice({
+    required this.label,
+    required this.detail,
+    required this.targetPath,
+  });
+
+  final String label;
+  final String detail;
+  final String targetPath;
 }
 
 class _ExplorerNode {
