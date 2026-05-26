@@ -37,6 +37,10 @@ if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException("SUPABASE_DB_CONNECTION environment variable is missing.");
 }
 
+var transferStorageRoot = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "transfer-storage");
+Directory.CreateDirectory(transferStorageRoot);
+await EnsureTransferTablesAsync(connectionString);
+
 var app = builder.Build();
 
 app.UseSwagger();
@@ -976,6 +980,575 @@ app.MapGet("/api/recovery/{deviceId:guid}", async (HttpRequest request, Guid dev
     }
 });
 
+app.MapGet("/api/transfers/history", async (HttpRequest request) =>
+{
+    var deviceIdValue = request.Query["deviceId"].ToString();
+    if (!Guid.TryParse(deviceIdValue, out var deviceId))
+    {
+        return Results.BadRequest(new { message = "A valid deviceId is required." });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var jobs = new List<TransferJobRecord>();
+        await using var command = new NpgsqlCommand(
+            """
+            select
+                id,
+                job_type,
+                status,
+                requested_file_path,
+                requested_file_name,
+                destination_path,
+                storage_key,
+                storage_file_name,
+                error_message,
+                created_at,
+                updated_at,
+                completed_at
+            from transfer_jobs
+            where user_id = @user_id
+              and device_id = @device_id
+            order by created_at desc
+            limit 100
+            """,
+            connection);
+        command.Parameters.AddWithValue("user_id", user.Id);
+        command.Parameters.AddWithValue("device_id", device.Id);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            jobs.Add(MapTransferJobRecord(reader));
+        }
+
+        return Results.Ok(jobs);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to load transfer history.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/transfers/download-from-device", async (HttpRequest request, DownloadFromDeviceRequest payload) =>
+{
+    if (payload is null || !Guid.TryParse(payload.DeviceId, out var deviceId))
+    {
+        return Results.BadRequest(new { message = "A valid deviceId is required." });
+    }
+
+    if (string.IsNullOrWhiteSpace(payload.FilePath))
+    {
+        return Results.BadRequest(new { message = "A file path is required." });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var fileName = Path.GetFileName(payload.FilePath.Trim());
+        var now = DateTimeOffset.UtcNow;
+        var jobId = Guid.NewGuid();
+
+        await using var command = new NpgsqlCommand(
+            """
+            insert into transfer_jobs (
+                id,
+                user_id,
+                device_id,
+                job_type,
+                status,
+                requested_file_path,
+                requested_file_name,
+                destination_path,
+                created_at,
+                updated_at
+            )
+            values (
+                @id,
+                @user_id,
+                @device_id,
+                @job_type,
+                @status,
+                @requested_file_path,
+                @requested_file_name,
+                @destination_path,
+                @created_at,
+                @updated_at
+            )
+            """,
+            connection);
+        command.Parameters.AddWithValue("id", jobId);
+        command.Parameters.AddWithValue("user_id", user.Id);
+        command.Parameters.AddWithValue("device_id", device.Id);
+        command.Parameters.AddWithValue("job_type", "download_from_device");
+        command.Parameters.AddWithValue("status", "Pending");
+        command.Parameters.AddWithValue("requested_file_path", payload.FilePath.Trim());
+        command.Parameters.AddWithValue("requested_file_name", fileName);
+        command.Parameters.AddWithValue("destination_path", string.Empty);
+        command.Parameters.AddWithValue("created_at", now);
+        command.Parameters.AddWithValue("updated_at", now);
+        await command.ExecuteNonQueryAsync();
+
+        return Results.Ok(new
+        {
+            message = "Download request created successfully.",
+            jobId,
+            status = "Pending",
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to create download request.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/transfers/upload-to-device", async (HttpRequest request) =>
+{
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var form = await request.ReadFormAsync();
+        var deviceIdValue = form["deviceId"].ToString();
+        if (!Guid.TryParse(deviceIdValue, out var deviceId))
+        {
+            return Results.BadRequest(new { message = "A valid deviceId is required." });
+        }
+
+        var device = await TryGetOwnedDeviceByIdAsync(connection, user.Id, deviceId);
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var file = form.Files["file"];
+        if (file is null || file.Length == 0)
+        {
+            return Results.BadRequest(new { message = "A file is required." });
+        }
+
+        var safeFileName = Path.GetFileName(file.FileName);
+        var storageKey = $"{Guid.NewGuid():N}_{safeFileName}";
+        var storagePath = Path.Combine(transferStorageRoot, storageKey);
+
+        await using (var fileStream = File.Create(storagePath))
+        {
+            await file.CopyToAsync(fileStream);
+        }
+
+        var destinationPath = form["destinationPath"].ToString();
+        var now = DateTimeOffset.UtcNow;
+        var jobId = Guid.NewGuid();
+
+        await using var command = new NpgsqlCommand(
+            """
+            insert into transfer_jobs (
+                id,
+                user_id,
+                device_id,
+                job_type,
+                status,
+                requested_file_path,
+                requested_file_name,
+                destination_path,
+                storage_key,
+                storage_file_name,
+                created_at,
+                updated_at
+            )
+            values (
+                @id,
+                @user_id,
+                @device_id,
+                @job_type,
+                @status,
+                @requested_file_path,
+                @requested_file_name,
+                @destination_path,
+                @storage_key,
+                @storage_file_name,
+                @created_at,
+                @updated_at
+            )
+            """,
+            connection);
+        command.Parameters.AddWithValue("id", jobId);
+        command.Parameters.AddWithValue("user_id", user.Id);
+        command.Parameters.AddWithValue("device_id", device.Id);
+        command.Parameters.AddWithValue("job_type", "upload_to_device");
+        command.Parameters.AddWithValue("status", "Pending");
+        command.Parameters.AddWithValue("requested_file_path", string.Empty);
+        command.Parameters.AddWithValue("requested_file_name", safeFileName);
+        command.Parameters.AddWithValue("destination_path", destinationPath);
+        command.Parameters.AddWithValue("storage_key", storageKey);
+        command.Parameters.AddWithValue("storage_file_name", safeFileName);
+        command.Parameters.AddWithValue("created_at", now);
+        command.Parameters.AddWithValue("updated_at", now);
+        await command.ExecuteNonQueryAsync();
+
+        return Results.Ok(new
+        {
+            message = "Upload-to-device request created successfully.",
+            jobId,
+            status = "Pending",
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to create upload-to-device request.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/api/transfers/{jobId:guid}/download", async (HttpRequest request, Guid jobId) =>
+{
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetAuthorizedUserAsync(request, connection);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var job = await TryGetTransferJobByIdAsync(connection, jobId);
+        if (job is null || job.UserId != user.Id)
+        {
+            return Results.NotFound(new { message = "Transfer job not found." });
+        }
+
+        if (!string.Equals(job.Status, "Completed", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(job.StorageKey))
+        {
+            return Results.BadRequest(new { message = "This transfer is not ready for download yet." });
+        }
+
+        var filePath = Path.Combine(transferStorageRoot, job.StorageKey);
+        if (!File.Exists(filePath))
+        {
+            return Results.NotFound(new { message = "The transfer file is no longer available." });
+        }
+
+        return Results.File(filePath, "application/octet-stream", job.StorageFileName);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to download the completed transfer.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/agent/jobs/pending", async (AgentJobPollRequest request) =>
+{
+    try
+    {
+        var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
+        if (!IsValidSetupCode(setupCode))
+        {
+            return Results.BadRequest(new { message = "Agent setup code format is invalid." });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.DeviceId))
+        {
+            return Results.BadRequest(new { message = "Device ID is required." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, NormalizeOptionalValue(request.DeviceId, 128));
+        device ??= await TryGetLatestOwnedDeviceAsync(connection, user.Id, string.Empty);
+        if (device is null)
+        {
+            return Results.Ok(Array.Empty<AgentTransferJobRecord>());
+        }
+
+        var jobs = new List<AgentTransferJobRecord>();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var selectCommand = new NpgsqlCommand(
+            """
+            select
+                id,
+                job_type,
+                requested_file_path,
+                destination_path,
+                storage_file_name
+            from transfer_jobs
+            where user_id = @user_id
+              and device_id = @device_id
+              and status = 'Pending'
+            order by created_at asc
+            limit 10
+            """,
+            connection,
+            transaction);
+        selectCommand.Parameters.AddWithValue("user_id", user.Id);
+        selectCommand.Parameters.AddWithValue("device_id", device.Id);
+
+        await using (var reader = await selectCommand.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                jobs.Add(new AgentTransferJobRecord(
+                    reader["id"]?.ToString() ?? string.Empty,
+                    reader["job_type"]?.ToString() ?? string.Empty,
+                    reader["requested_file_path"]?.ToString() ?? string.Empty,
+                    reader["destination_path"]?.ToString() ?? string.Empty,
+                    reader["storage_file_name"]?.ToString() ?? string.Empty));
+            }
+        }
+
+        foreach (var job in jobs)
+        {
+            await using var updateCommand = new NpgsqlCommand(
+                """
+                update transfer_jobs
+                set status = 'In Progress',
+                    updated_at = @updated_at
+                where id = @id
+                """,
+                connection,
+                transaction);
+            updateCommand.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+            updateCommand.Parameters.AddWithValue("id", Guid.Parse(job.Id));
+            await updateCommand.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+        return Results.Ok(jobs);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to load pending agent jobs.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapGet("/api/agent/jobs/{jobId:guid}/content", async (Guid jobId, string setupCode, string deviceId) =>
+{
+    try
+    {
+        var normalizedSetupCode = NormalizeSetupCode(setupCode);
+        if (!IsValidSetupCode(normalizedSetupCode))
+        {
+            return Results.BadRequest(new { message = "Agent setup code format is invalid." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetUserBySetupCodeAsync(connection, normalizedSetupCode);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, NormalizeOptionalValue(deviceId, 128));
+        if (device is null)
+        {
+            return Results.NotFound(new { message = "Device not found." });
+        }
+
+        var job = await TryGetTransferJobByIdAsync(connection, jobId);
+        if (job is null || job.UserId != user.Id || job.DeviceId != device.Id)
+        {
+            return Results.NotFound(new { message = "Transfer job not found." });
+        }
+
+        var filePath = Path.Combine(transferStorageRoot, job.StorageKey);
+        if (!File.Exists(filePath))
+        {
+            return Results.NotFound(new { message = "Transfer content not found." });
+        }
+
+        return Results.File(filePath, "application/octet-stream", job.StorageFileName);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to load transfer content.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/agent/jobs/{jobId:guid}/complete-upload", async (Guid jobId, AgentJobUpdateRequest request) =>
+{
+    return await CompleteAgentTransferJobAsync(
+        connectionString,
+        jobId,
+        request,
+        "upload_to_device",
+        transferStorageRoot,
+        null);
+});
+
+app.MapPost("/api/agent/jobs/{jobId:guid}/complete-download", async (HttpRequest httpRequest, Guid jobId) =>
+{
+    try
+    {
+        var form = await httpRequest.ReadFormAsync();
+        var request = new AgentJobUpdateRequest(
+            form["setupCode"].ToString(),
+            form["agentSetupCode"].ToString(),
+            form["deviceId"].ToString(),
+            string.Empty,
+            string.Empty);
+        var file = form.Files["file"];
+        if (file is null || file.Length == 0)
+        {
+            return Results.BadRequest(new { message = "A file is required." });
+        }
+
+        return await CompleteAgentTransferJobAsync(
+            connectionString,
+            jobId,
+            request,
+            "download_from_device",
+            transferStorageRoot,
+            file);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to complete the download-from-device job.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
+app.MapPost("/api/agent/jobs/{jobId:guid}/fail", async (Guid jobId, AgentJobUpdateRequest request) =>
+{
+    try
+    {
+        var validation = await ValidateAgentJobOwnershipAsync(connectionString, jobId, request);
+        if (validation.ErrorResult is not null)
+        {
+            return validation.ErrorResult;
+        }
+
+        await using var connection = validation.Connection!;
+        await using var command = new NpgsqlCommand(
+            """
+            update transfer_jobs
+            set status = 'Failed',
+                error_message = @error_message,
+                updated_at = @updated_at
+            where id = @id
+            """,
+            connection);
+        command.Parameters.AddWithValue("error_message", NormalizeOptionalValueOrEmpty(request.ErrorMessage, 400));
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("id", jobId);
+        await command.ExecuteNonQueryAsync();
+
+        return Results.Ok(new { message = "Transfer job marked as failed." });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to mark the transfer job as failed.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+});
+
 app.Run();
 
 async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest request)
@@ -1136,6 +1709,187 @@ async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest reques
             new { message = "Unable to save emergency recovery file list right now." },
             statusCode: StatusCodes.Status500InternalServerError);
     }
+}
+
+static async Task EnsureTransferTablesAsync(string connectionString)
+{
+    await using var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync();
+
+    await using var command = new NpgsqlCommand(
+        """
+        create table if not exists transfer_jobs (
+            id uuid not null primary key,
+            user_id uuid not null references app_users(id),
+            device_id uuid not null references devices(id),
+            job_type text not null,
+            status text not null default 'Pending',
+            requested_file_path text not null default '',
+            requested_file_name text not null default '',
+            destination_path text not null default '',
+            storage_key text not null default '',
+            storage_file_name text not null default '',
+            error_message text not null default '',
+            created_at timestamp with time zone not null default now(),
+            updated_at timestamp with time zone not null default now(),
+            completed_at timestamp with time zone
+        );
+
+        create index if not exists idx_transfer_jobs_user_device_created
+            on transfer_jobs(user_id, device_id, created_at desc);
+
+        create index if not exists idx_transfer_jobs_device_status
+            on transfer_jobs(device_id, status, created_at asc);
+        """,
+        connection);
+
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task<TransferJobOwnershipValidation> ValidateAgentJobOwnershipAsync(
+    string connectionString,
+    Guid jobId,
+    AgentJobUpdateRequest request)
+{
+    var normalizedSetupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
+    if (!IsValidSetupCode(normalizedSetupCode))
+    {
+        return new TransferJobOwnershipValidation(
+            null,
+            null,
+            Results.BadRequest(new { message = "Agent setup code format is invalid." }));
+    }
+
+    if (string.IsNullOrWhiteSpace(request.DeviceId))
+    {
+        return new TransferJobOwnershipValidation(
+            null,
+            null,
+            Results.BadRequest(new { message = "Device ID is required." }));
+    }
+
+    var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync();
+
+    var user = await TryGetUserBySetupCodeAsync(connection, normalizedSetupCode);
+    if (user is null)
+    {
+        await connection.DisposeAsync();
+        return new TransferJobOwnershipValidation(null, null, Results.Unauthorized());
+    }
+
+    var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, NormalizeOptionalValue(request.DeviceId, 128));
+    if (device is null)
+    {
+        await connection.DisposeAsync();
+        return new TransferJobOwnershipValidation(
+            null,
+            null,
+            Results.NotFound(new { message = "Device not found." }));
+    }
+
+    var job = await TryGetTransferJobByIdAsync(connection, jobId);
+    if (job is null || job.UserId != user.Id || job.DeviceId != device.Id)
+    {
+        await connection.DisposeAsync();
+        return new TransferJobOwnershipValidation(
+            null,
+            null,
+            Results.NotFound(new { message = "Transfer job not found." }));
+    }
+
+    return new TransferJobOwnershipValidation(connection, job, null);
+}
+
+static async Task<IResult> CompleteAgentTransferJobAsync(
+    string connectionString,
+    Guid jobId,
+    AgentJobUpdateRequest request,
+    string expectedJobType,
+    string transferStorageRoot,
+    IFormFile? uploadedFile)
+{
+    try
+    {
+        var validation = await ValidateAgentJobOwnershipAsync(connectionString, jobId, request);
+        if (validation.ErrorResult is not null)
+        {
+            return validation.ErrorResult;
+        }
+
+        await using var connection = validation.Connection!;
+        var job = validation.Job!;
+
+        if (!string.Equals(job.JobType, expectedJobType, StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.BadRequest(new { message = "Transfer job type mismatch." });
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var storageKey = job.StorageKey;
+        var storageFileName = job.StorageFileName;
+
+        if (uploadedFile is not null)
+        {
+            storageFileName = string.IsNullOrWhiteSpace(uploadedFile.FileName)
+                ? job.RequestedFileName
+                : Path.GetFileName(uploadedFile.FileName);
+            storageKey = $"{Guid.NewGuid():N}_{storageFileName}";
+            var storagePath = Path.Combine(transferStorageRoot, storageKey);
+
+            await using var fileStream = File.Create(storagePath);
+            await uploadedFile.CopyToAsync(fileStream);
+        }
+
+        await using var command = new NpgsqlCommand(
+            """
+            update transfer_jobs
+            set status = 'Completed',
+                storage_key = @storage_key,
+                storage_file_name = @storage_file_name,
+                error_message = '',
+                updated_at = @updated_at,
+                completed_at = @completed_at
+            where id = @id
+            """,
+            connection);
+        command.Parameters.AddWithValue("storage_key", storageKey);
+        command.Parameters.AddWithValue("storage_file_name", storageFileName);
+        command.Parameters.AddWithValue("updated_at", now);
+        command.Parameters.AddWithValue("completed_at", now);
+        command.Parameters.AddWithValue("id", jobId);
+        await command.ExecuteNonQueryAsync();
+
+        return Results.Ok(new { message = "Transfer job completed successfully." });
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.ToString());
+        return Results.Json(
+            new
+            {
+                message = "Unable to complete the transfer job.",
+                error = ex.Message,
+                details = ex.ToString(),
+            },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+}
+
+static TransferJobRecord MapTransferJobRecord(NpgsqlDataReader reader)
+{
+    return new TransferJobRecord(
+        reader["id"]?.ToString() ?? string.Empty,
+        reader["job_type"]?.ToString() ?? string.Empty,
+        reader["status"]?.ToString() ?? string.Empty,
+        reader["requested_file_path"]?.ToString() ?? string.Empty,
+        reader["requested_file_name"]?.ToString() ?? string.Empty,
+        reader["destination_path"]?.ToString() ?? string.Empty,
+        reader["storage_file_name"]?.ToString() ?? string.Empty,
+        reader["error_message"]?.ToString() ?? string.Empty,
+        ToIsoString(reader["created_at"]),
+        ToIsoString(reader["updated_at"]),
+        ToIsoString(reader["completed_at"]));
 }
 
 static HashSet<string> BuildAllowedOrigins(string? configuredFrontendOrigin)
@@ -1373,6 +2127,40 @@ static async Task<RecoverySettingsStorageRecord?> TryGetRecoverySettingsAsync(Np
         ? new RecoverySettingsStorageRecord(
             reader["enabled"] is bool enabled && enabled,
             reader["approved_locations"]?.ToString() ?? "[]")
+        : null;
+}
+
+static async Task<TransferJobStorageRecord?> TryGetTransferJobByIdAsync(NpgsqlConnection connection, Guid jobId)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select
+            id,
+            user_id,
+            device_id,
+            job_type,
+            status,
+            requested_file_name,
+            storage_key,
+            storage_file_name
+        from transfer_jobs
+        where id = @id
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("id", jobId);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new TransferJobStorageRecord(
+            reader.GetGuid(reader.GetOrdinal("id")),
+            reader.GetGuid(reader.GetOrdinal("user_id")),
+            reader.GetGuid(reader.GetOrdinal("device_id")),
+            reader["job_type"]?.ToString() ?? string.Empty,
+            reader["status"]?.ToString() ?? string.Empty,
+            reader["requested_file_name"]?.ToString() ?? string.Empty,
+            reader["storage_key"]?.ToString() ?? string.Empty,
+            reader["storage_file_name"]?.ToString() ?? string.Empty)
         : null;
 }
 
@@ -2029,6 +2817,21 @@ record RecoverySettingsStorageRecord(
     bool Enabled,
     string ApprovedLocationsJson);
 
+record TransferJobStorageRecord(
+    Guid Id,
+    Guid UserId,
+    Guid DeviceId,
+    string JobType,
+    string Status,
+    string RequestedFileName,
+    string StorageKey,
+    string StorageFileName);
+
+record TransferJobOwnershipValidation(
+    NpgsqlConnection? Connection,
+    TransferJobStorageRecord? Job,
+    IResult? ErrorResult);
+
 record DeviceRecord(
     string Id,
     string DeviceName,
@@ -2130,3 +2933,39 @@ record RecoveryFileRecord(
     string? LastModified,
     bool IsDirectory,
     string? DriveLetter);
+
+record DownloadFromDeviceRequest(
+    string? DeviceId,
+    string? FilePath);
+
+record TransferJobRecord(
+    string Id,
+    string JobType,
+    string Status,
+    string RequestedFilePath,
+    string RequestedFileName,
+    string DestinationPath,
+    string StorageFileName,
+    string ErrorMessage,
+    string CreatedAt,
+    string UpdatedAt,
+    string CompletedAt);
+
+record AgentJobPollRequest(
+    string? SetupCode,
+    string? AgentSetupCode,
+    string? DeviceId);
+
+record AgentTransferJobRecord(
+    string Id,
+    string JobType,
+    string RequestedFilePath,
+    string DestinationPath,
+    string StorageFileName);
+
+record AgentJobUpdateRequest(
+    string? SetupCode,
+    string? AgentSetupCode,
+    string? DeviceId,
+    string? LocalPath,
+    string? ErrorMessage);

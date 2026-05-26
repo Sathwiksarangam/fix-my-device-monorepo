@@ -159,3 +159,61 @@ class RecoveryInventory {
     );
   }
 }
+
+class TransferJob {
+  const TransferJob({
+    required this.id,
+    required this.jobType,
+    required this.status,
+    required this.requestedFilePath,
+    required this.requestedFileName,
+    required this.destinationPath,
+    required this.storageFileName,
+    required this.errorMessage,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.completedAt,
+  });
+
+  final String id;
+  final String jobType;
+  final String status;
+  final String requestedFilePath;
+  final String requestedFileName;
+  final String destinationPath;
+  final String storageFileName;
+  final String errorMessage;
+  final String createdAt;
+  final String updatedAt;
+  final String completedAt;
+
+  bool get isCompleted => status.toLowerCase() == 'completed';
+
+  bool get isFailed => status.toLowerCase() == 'failed';
+
+  factory TransferJob.fromJson(Map<String, dynamic> json) {
+    return TransferJob(
+      id: json['id']?.toString() ?? '',
+      jobType: json['jobType']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      requestedFilePath: json['requestedFilePath']?.toString() ?? '',
+      requestedFileName: json['requestedFileName']?.toString() ?? '',
+      destinationPath: json['destinationPath']?.toString() ?? '',
+      storageFileName: json['storageFileName']?.toString() ?? '',
+      errorMessage: json['errorMessage']?.toString() ?? '',
+      createdAt: json['createdAt']?.toString() ?? '',
+      updatedAt: json['updatedAt']?.toString() ?? '',
+      completedAt: json['completedAt']?.toString() ?? '',
+    );
+  }
+}
+
+class TransferDownload {
+  const TransferDownload({
+    required this.fileName,
+    required this.bytes,
+  });
+
+  final String fileName;
+  final List<int> bytes;
+}

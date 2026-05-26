@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -189,6 +190,123 @@ class ApiDeviceService {
     }
 
     return RecoveryInventory.fromJson(data);
+  }
+
+  Future<void> requestRecoveryDownload({
+    required String deviceId,
+    required String filePath,
+  }) async {
+    final token = _requireToken();
+
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/api/transfers/download-from-device'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(<String, dynamic>{
+            'deviceId': deviceId,
+            'filePath': filePath,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to create recovery download request.',
+      ));
+    }
+  }
+
+  Future<void> uploadFileToDevice({
+    required String deviceId,
+    required String destinationPath,
+    required String fileName,
+    required Uint8List bytes,
+  }) async {
+    final token = _requireToken();
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$baseUrl/api/transfers/upload-to-device'),
+    );
+    request.headers['Authorization'] = 'Bearer $token';
+    request.fields['deviceId'] = deviceId;
+    request.fields['destinationPath'] = destinationPath;
+    request.files.add(http.MultipartFile.fromBytes(
+      'file',
+      bytes,
+      filename: fileName,
+    ));
+
+    final streamedResponse =
+        await request.send().timeout(const Duration(seconds: 60));
+    final response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to create upload-to-device request.',
+      ));
+    }
+  }
+
+  Future<List<TransferJob>> getTransferHistory(String deviceId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .get(
+          Uri.parse('$baseUrl/api/transfers/history?deviceId=$deviceId'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to load transfer history.',
+      ));
+    }
+
+    final dynamic data = jsonDecode(response.body);
+    if (data is! List<dynamic>) {
+      return <TransferJob>[];
+    }
+
+    return data
+        .whereType<Map<String, dynamic>>()
+        .map(TransferJob.fromJson)
+        .toList();
+  }
+
+  Future<TransferDownload> downloadTransferFile(String jobId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .get(
+          Uri.parse('$baseUrl/api/transfers/$jobId/download'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 60));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to download the completed transfer.',
+      ));
+    }
+
+    final String disposition = response.headers['content-disposition'] ?? '';
+    final RegExpMatch? match =
+        RegExp('filename="([^"]+)"').firstMatch(disposition);
+    final String fileName = match?.group(1) ?? 'FixMyDeviceDownload.bin';
+
+    return TransferDownload(fileName: fileName, bytes: response.bodyBytes);
   }
 
   String _extractErrorMessage(

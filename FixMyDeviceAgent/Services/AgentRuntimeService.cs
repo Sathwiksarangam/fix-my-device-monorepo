@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Net.Http.Headers;
 using FixMyDeviceAgent.Models;
 
 namespace FixMyDeviceAgent.Services;
@@ -14,6 +15,7 @@ public sealed class AgentRuntimeService : IDisposable
     private const string DeviceInfoEndpoint = "/api/devices/system-info-by-code";
     private const string RecoverySettingsEndpoint = "/api/recovery/settings";
     private const string RecoveryUploadEndpoint = "/api/recovery/file-listings";
+    private const string AgentPendingJobsEndpoint = "/api/agent/jobs/pending";
 
     private readonly AgentStorageService _storageService;
     private readonly WindowsDeviceInfoService _deviceInfoService;
@@ -50,6 +52,8 @@ public sealed class AgentRuntimeService : IDisposable
 
     public string ConfigDirectoryPath => _storageService.ConfigDirectoryPath;
 
+    public string BackupDirectoryPath => _storageService.BackupDirectoryPath;
+
     public Task<AgentConfig?> LoadAgentConfigAsync()
         => _storageService.LoadAgentConfigAsync();
 
@@ -67,6 +71,24 @@ public sealed class AgentRuntimeService : IDisposable
 
     public Task DeleteRecoveryConfigAsync()
         => _storageService.DeleteRecoveryConfigAsync();
+
+    public void OpenBackupFolder()
+    {
+        Directory.CreateDirectory(BackupDirectoryPath);
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = BackupDirectoryPath,
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // Best-effort action for console menu.
+        }
+    }
 
     public async Task<bool> ValidateSetupCodeAsync(string setupCode)
     {
@@ -197,6 +219,12 @@ public sealed class AgentRuntimeService : IDisposable
 
         if (!normalizedRecoveryConfig.Enabled)
         {
+            await ProcessPendingAgentJobsAsync(
+                normalizedSetupCode,
+                deviceInfo,
+                normalizedRecoveryConfig,
+                traces);
+
             return SyncExecutionResult.Success(
                 "Device heartbeat updated. Emergency Recovery is disabled.",
                 traces);
@@ -232,6 +260,12 @@ public sealed class AgentRuntimeService : IDisposable
                 "Emergency Recovery inventory could not be uploaded.",
                 traces);
         }
+
+        await ProcessPendingAgentJobsAsync(
+            normalizedSetupCode,
+            deviceInfo,
+            normalizedRecoveryConfig,
+            traces);
 
         return SyncExecutionResult.Success(
             $"Device synced successfully. Recovery inventory updated with {recoveryEntries.Count} entries.",
@@ -312,6 +346,187 @@ public sealed class AgentRuntimeService : IDisposable
         {
             return new SendResult(false, 0, ex.Message, ex.ToString());
         }
+    }
+
+    private async Task ProcessPendingAgentJobsAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        RecoveryConfig recoveryConfig,
+        ICollection<ApiCallTrace> traces)
+    {
+        var pollPayload = JsonSerializer.Serialize(
+            new AgentJobPollRequest(setupCode, setupCode, deviceInfo.DeviceId),
+            _jsonOptions);
+        var pendingJobsResult = await SendPostAsync(
+            $"{BackendBaseUrl}{AgentPendingJobsEndpoint}",
+            pollPayload);
+        traces.Add(pendingJobsResult.ToTrace("Agent Jobs"));
+
+        if (!pendingJobsResult.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        List<AgentTransferJob> jobs;
+        try
+        {
+            jobs = JsonSerializer.Deserialize<List<AgentTransferJob>>(pendingJobsResult.ResponseText, _jsonOptions) ??
+                   [];
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var job in jobs)
+        {
+            if (string.IsNullOrWhiteSpace(job.Id) || string.IsNullOrWhiteSpace(job.JobType))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (string.Equals(job.JobType, "upload_to_device", StringComparison.OrdinalIgnoreCase))
+                {
+                    await ProcessUploadToDeviceJobAsync(setupCode, deviceInfo, job, traces);
+                }
+                else if (string.Equals(job.JobType, "download_from_device", StringComparison.OrdinalIgnoreCase))
+                {
+                    await ProcessDownloadFromDeviceJobAsync(setupCode, deviceInfo, recoveryConfig, job, traces);
+                }
+            }
+            catch (Exception ex)
+            {
+                await ReportAgentJobFailureAsync(setupCode, deviceInfo, job.Id, ex.Message, traces);
+            }
+        }
+    }
+
+    private async Task ProcessUploadToDeviceJobAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        AgentTransferJob job,
+        ICollection<ApiCallTrace> traces)
+    {
+        var contentUrl =
+            $"{BackendBaseUrl}/api/agent/jobs/{job.Id}/content?setupCode={Uri.EscapeDataString(setupCode)}&deviceId={Uri.EscapeDataString(deviceInfo.DeviceId)}";
+
+        using var response = await _httpClient.GetAsync(contentUrl);
+        var responseText = await response.Content.ReadAsStringAsync();
+        traces.Add(new ApiCallTrace("Job Content", ((int)response.StatusCode).ToString(), responseText));
+
+        if (!response.IsSuccessStatusCode)
+        {
+            await ReportAgentJobFailureAsync(
+                setupCode,
+                deviceInfo,
+                job.Id,
+                string.IsNullOrWhiteSpace(responseText) ? "Unable to download queued transfer content." : responseText,
+                traces);
+            return;
+        }
+
+        var targetPath = GetSafeBackupDestination(job.DestinationPath, job.StorageFileName);
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        var fileBytes = await response.Content.ReadAsByteArrayAsync();
+        await File.WriteAllBytesAsync(targetPath, fileBytes);
+
+        var completionPayload = JsonSerializer.Serialize(
+            new AgentJobStatusRequest(setupCode, setupCode, deviceInfo.DeviceId, targetPath, string.Empty),
+            _jsonOptions);
+        var completionResult = await SendPostAsync(
+            $"{BackendBaseUrl}/api/agent/jobs/{job.Id}/complete-upload",
+            completionPayload);
+        traces.Add(completionResult.ToTrace("Upload To Device"));
+    }
+
+    private async Task ProcessDownloadFromDeviceJobAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        RecoveryConfig recoveryConfig,
+        AgentTransferJob job,
+        ICollection<ApiCallTrace> traces)
+    {
+        if (!_recoveryService.TryResolveApprovedFilePath(
+                job.RequestedFilePath,
+                recoveryConfig.ApprovedLocations,
+                out var safePath))
+        {
+            await ReportAgentJobFailureAsync(
+                setupCode,
+                deviceInfo,
+                job.Id,
+                "The requested file is outside approved recovery folders.",
+                traces);
+            return;
+        }
+
+        await using var fileStream = File.OpenRead(safePath);
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(setupCode), "setupCode");
+        content.Add(new StringContent(setupCode), "agentSetupCode");
+        content.Add(new StringContent(deviceInfo.DeviceId), "deviceId");
+        var fileContent = new StreamContent(fileStream);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(fileContent, "file", Path.GetFileName(safePath));
+
+        using var response = await _httpClient.PostAsync(
+            $"{BackendBaseUrl}/api/agent/jobs/{job.Id}/complete-download",
+            content);
+        var responseText = await response.Content.ReadAsStringAsync();
+        traces.Add(new ApiCallTrace("Download From Device", ((int)response.StatusCode).ToString(), responseText));
+
+        if (!response.IsSuccessStatusCode)
+        {
+            await ReportAgentJobFailureAsync(
+                setupCode,
+                deviceInfo,
+                job.Id,
+                string.IsNullOrWhiteSpace(responseText) ? "Unable to upload the requested device file." : responseText,
+                traces);
+        }
+    }
+
+    private async Task ReportAgentJobFailureAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        string jobId,
+        string errorMessage,
+        ICollection<ApiCallTrace> traces)
+    {
+        var failurePayload = JsonSerializer.Serialize(
+            new AgentJobStatusRequest(setupCode, setupCode, deviceInfo.DeviceId, string.Empty, errorMessage),
+            _jsonOptions);
+        var result = await SendPostAsync(
+            $"{BackendBaseUrl}/api/agent/jobs/{jobId}/fail",
+            failurePayload);
+        traces.Add(result.ToTrace("Agent Job Failure"));
+    }
+
+    private string GetSafeBackupDestination(string? destinationPath, string? fileName)
+    {
+        Directory.CreateDirectory(BackupDirectoryPath);
+
+        var relativeFolder = string.IsNullOrWhiteSpace(destinationPath)
+            ? string.Empty
+            : destinationPath.Trim().Replace('/', '\\').Trim('\\');
+        var safeFileName = string.IsNullOrWhiteSpace(fileName)
+            ? $"transfer-{Guid.NewGuid():N}.bin"
+            : Path.GetFileName(fileName);
+
+        var candidatePath = string.IsNullOrWhiteSpace(relativeFolder)
+            ? Path.Combine(BackupDirectoryPath, safeFileName)
+            : Path.Combine(BackupDirectoryPath, relativeFolder, safeFileName);
+        var fullPath = Path.GetFullPath(candidatePath);
+        var backupRoot = Path.GetFullPath(BackupDirectoryPath);
+
+        if (!fullPath.StartsWith(backupRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine(backupRoot, safeFileName);
+        }
+
+        return fullPath;
     }
 
     private static string NormalizeSetupCode(string? setupCode)
@@ -455,3 +670,22 @@ public sealed record ApiCallTrace(
     string StepName,
     string StatusCodeText,
     string ResponseBody);
+
+public sealed record AgentJobPollRequest(
+    string SetupCode,
+    string AgentSetupCode,
+    string DeviceId);
+
+public sealed record AgentJobStatusRequest(
+    string SetupCode,
+    string AgentSetupCode,
+    string DeviceId,
+    string LocalPath,
+    string ErrorMessage);
+
+public sealed record AgentTransferJob(
+    string Id,
+    string JobType,
+    string RequestedFilePath,
+    string DestinationPath,
+    string StorageFileName);

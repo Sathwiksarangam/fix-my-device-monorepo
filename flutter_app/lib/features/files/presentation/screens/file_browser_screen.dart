@@ -72,6 +72,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   String? _currentRootPath;
   String? _currentFolderPath;
   final Set<String> _checkedPaths = <String>{};
+  final Set<String> _directoryPaths = <String>{};
 
   @override
   void initState() {
@@ -127,6 +128,11 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
 
     final RecoverySettings settings = results[0] as RecoverySettings;
     final List<RecoveryFileEntry> files = results[1] as List<RecoveryFileEntry>;
+    _directoryPaths
+      ..clear()
+      ..addAll(files
+          .where((RecoveryFileEntry entry) => entry.isDirectory)
+          .map((RecoveryFileEntry entry) => entry.fullPath));
     final selectableLocations = _buildSelectableLocations(selectedDevice, settings);
     final explorer = _RecoveryExplorerModel.fromEntries(files);
 
@@ -236,6 +242,53 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     });
   }
 
+  List<String> get _selectedDownloadablePaths => _checkedPaths
+      .where((String path) => !_directoryPaths.contains(path))
+      .toList(growable: false);
+
+  Future<void> _requestSelectedDownloads() async {
+    final String? deviceId = _draftDeviceId ?? _selectedDeviceId;
+    if (deviceId == null) {
+      return;
+    }
+
+    final List<String> selectedPaths = _selectedDownloadablePaths;
+    if (selectedPaths.isEmpty) {
+      return;
+    }
+
+    try {
+      for (final String path in selectedPaths) {
+        await ApiDeviceService().requestRecoveryDownload(
+          deviceId: deviceId,
+          filePath: path,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            selectedPaths.length == 1
+                ? 'Download request created. Check File Transfer for status.'
+                : '${selectedPaths.length} download requests created. Check File Transfer for status.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
   Future<void> _saveRecoverySelection() async {
     if (_draftDeviceId == null || _draftLocations.isEmpty) {
       return;
@@ -291,12 +344,14 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     setState(() {
       _currentRootPath = rootPath;
       _currentFolderPath = rootPath;
+      _checkedPaths.clear();
     });
   }
 
   void _openFolder(String folderPath) {
     setState(() {
       _currentFolderPath = folderPath;
+      _checkedPaths.clear();
     });
   }
 
@@ -712,6 +767,16 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                         fontWeight: FontWeight.w700,
                       ),
                 ),
+                if (_selectedDownloadablePaths.isNotEmpty)
+                  OutlinedButton.icon(
+                    onPressed: _requestSelectedDownloads,
+                    icon: const Icon(Icons.download_rounded),
+                    label: Text(
+                      _selectedDownloadablePaths.length == 1
+                          ? 'Download'
+                          : 'Download Selected',
+                    ),
+                  ),
               ],
             ),
             const SizedBox(height: 16),
@@ -870,7 +935,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                 ? Center(
                     child: Text(
                       explorer.roots.isEmpty
-                          ? 'Run the agent sync after enabling recovery.'
+                          ? 'No recovery files found. Run the agent and sync Emergency Recovery first.'
                           : 'No files or folders match this view.',
                     ),
                   )

@@ -204,6 +204,45 @@ public sealed class EmergencyRecoveryService
         return entries;
     }
 
+    public bool TryResolveApprovedFilePath(
+        string requestedPath,
+        IReadOnlyList<RecoveryApprovedLocation> approvedLocations,
+        out string safePath)
+    {
+        safePath = string.Empty;
+
+        var normalizedRequestedPath = NormalizePath(requestedPath);
+        if (string.IsNullOrWhiteSpace(normalizedRequestedPath) ||
+            !File.Exists(normalizedRequestedPath) ||
+            IsUnsafeSystemPath(normalizedRequestedPath))
+        {
+            return false;
+        }
+
+        foreach (var location in NormalizeApprovedLocations(approvedLocations))
+        {
+            var rootPath = ResolveApprovedLocationPath(location);
+            if (string.IsNullOrWhiteSpace(rootPath))
+            {
+                continue;
+            }
+
+            var normalizedRootPath = NormalizePath(rootPath);
+            if (string.IsNullOrWhiteSpace(normalizedRootPath))
+            {
+                continue;
+            }
+
+            if (IsPathWithinRoot(normalizedRequestedPath, normalizedRootPath))
+            {
+                safePath = normalizedRequestedPath;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static void AddDirectoryEntry(
         string directoryPath,
         ICollection<RecoveryFileEntry> entries,
@@ -412,6 +451,17 @@ public sealed class EmergencyRecoveryService
     private static bool IsExistingDirectory(string path)
     {
         return !string.IsNullOrWhiteSpace(path) && Directory.Exists(path);
+    }
+
+    private static bool IsPathWithinRoot(string path, string rootPath)
+    {
+        if (string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var normalizedRoot = rootPath.EndsWith('\\') ? rootPath : rootPath + "\\";
+        return path.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizePath(string? path)

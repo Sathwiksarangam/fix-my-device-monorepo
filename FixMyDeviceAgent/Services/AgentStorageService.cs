@@ -8,6 +8,7 @@ public sealed class AgentStorageService
     private const string ConfigDirectoryName = "Fix My Device Agent";
     private const string AgentConfigFileName = "agent-config.json";
     private const string RecoveryConfigFileName = "recovery-config.json";
+    private const string BackupDirectoryName = "Fix My Device Backups";
 
     public AgentStorageService()
     {
@@ -18,6 +19,11 @@ public sealed class AgentStorageService
         Directory.CreateDirectory(ConfigDirectoryPath);
         AgentConfigPath = Path.Combine(ConfigDirectoryPath, AgentConfigFileName);
         RecoveryConfigPath = Path.Combine(ConfigDirectoryPath, RecoveryConfigFileName);
+        BackupDirectoryPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            BackupDirectoryName);
+
+        Directory.CreateDirectory(BackupDirectoryPath);
     }
 
     public string ConfigDirectoryPath { get; }
@@ -25,6 +31,8 @@ public sealed class AgentStorageService
     public string AgentConfigPath { get; }
 
     public string RecoveryConfigPath { get; }
+
+    public string BackupDirectoryPath { get; }
 
     public async Task<AgentConfig?> LoadAgentConfigAsync()
     {
