@@ -13,7 +13,7 @@ public sealed class AgentRuntimeService : IDisposable
     private const string DashboardUrl = "https://fix-my-device.netlify.app";
     private const string DeviceInfoEndpoint = "/api/devices/system-info-by-code";
     private const string RecoverySettingsEndpoint = "/api/recovery/settings";
-    private const string RecoveryUploadEndpoint = "/api/recovery/upload";
+    private const string RecoveryUploadEndpoint = "/api/recovery/file-listings";
 
     private readonly AgentStorageService _storageService;
     private readonly WindowsDeviceInfoService _deviceInfoService;

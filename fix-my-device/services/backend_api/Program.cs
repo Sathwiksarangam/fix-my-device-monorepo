@@ -804,164 +804,8 @@ app.MapGet("/api/recovery/settings", async (HttpRequest request) =>
     }
 });
 
-app.MapPost("/api/recovery/upload", async (RecoveryFileListRequest request) =>
-{
-    if (request is null)
-    {
-        return Results.BadRequest(new { message = "Recovery file list payload is required." });
-    }
-
-    var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
-    if (!IsValidSetupCode(setupCode))
-    {
-        return Results.BadRequest(new { message = "Agent setup code format is invalid." });
-    }
-
-    if (!TryValidateRecoveryFileListRequest(request, out var validationMessage))
-    {
-        return Results.BadRequest(new { message = validationMessage });
-    }
-
-    try
-    {
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-
-        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
-        if (user is null)
-        {
-            return Results.Unauthorized();
-        }
-
-        var normalizedDeviceId = NormalizeOptionalValue(request.DeviceId, 128);
-        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, normalizedDeviceId);
-        device ??= await TryGetLatestOwnedDeviceAsync(
-            connection,
-            user.Id,
-            NormalizeOptionalValueOrEmpty(request.DeviceName, 200));
-        if (device is null)
-        {
-            return Results.BadRequest(new { message = "Device must be connected before recovery files can be scanned." });
-        }
-
-        var settings = await TryGetRecoverySettingsAsync(connection, user.Id, device.Id);
-        if (settings is null || !settings.Enabled)
-        {
-            return Results.BadRequest(new { message = "Emergency recovery mode is not enabled for this device." });
-        }
-
-        var approvedLocations = DeserializeApprovedLocations(settings.ApprovedLocationsJson);
-        var normalizedEntries = FilterRecoveryEntriesWithinApprovedLocations(
-            NormalizeRecoveryFileEntries(request.Entries),
-            approvedLocations);
-
-        await using var transaction = await connection.BeginTransactionAsync();
-
-        await using (var deleteCommand = new NpgsqlCommand(
-            """
-            delete from recovery_file_listings
-            where user_id = @user_id
-              and device_id = @device_id
-            """,
-            connection,
-            transaction))
-        {
-            deleteCommand.Parameters.AddWithValue("user_id", user.Id);
-            deleteCommand.Parameters.AddWithValue("device_id", device.Id);
-            await deleteCommand.ExecuteNonQueryAsync();
-        }
-
-        foreach (var entry in normalizedEntries)
-        {
-            await using var insertCommand = new NpgsqlCommand(
-                """
-                insert into recovery_file_listings (
-                    id,
-                    user_id,
-                    device_id,
-                    file_name,
-                    full_path,
-                    extension,
-                    size_bytes,
-                    last_modified_at,
-                    is_directory,
-                    drive_letter,
-                    created_at,
-                    updated_at
-                )
-                values (
-                    @id,
-                    @user_id,
-                    @device_id,
-                    @file_name,
-                    @full_path,
-                    @extension,
-                    @size_bytes,
-                    @last_modified_at,
-                    @is_directory,
-                    @drive_letter,
-                    @created_at,
-                    @updated_at
-                )
-                """,
-                connection,
-                transaction);
-
-            insertCommand.Parameters.AddWithValue("id", Guid.NewGuid());
-            insertCommand.Parameters.AddWithValue("user_id", user.Id);
-            insertCommand.Parameters.AddWithValue("device_id", device.Id);
-            insertCommand.Parameters.AddWithValue("file_name", entry.FileName ?? string.Empty);
-            insertCommand.Parameters.AddWithValue("full_path", entry.FullPath ?? string.Empty);
-            insertCommand.Parameters.AddWithValue("extension", entry.Extension ?? string.Empty);
-            insertCommand.Parameters.AddWithValue("size_bytes", entry.SizeBytes);
-            insertCommand.Parameters.AddWithValue("last_modified_at",
-                string.IsNullOrWhiteSpace(entry.LastModified)
-                    ? DBNull.Value
-                    : DateTimeOffset.Parse(entry.LastModified));
-            insertCommand.Parameters.AddWithValue("is_directory", entry.IsDirectory);
-            insertCommand.Parameters.AddWithValue("drive_letter", entry.DriveLetter ?? string.Empty);
-            insertCommand.Parameters.AddWithValue("created_at", DateTimeOffset.UtcNow);
-            insertCommand.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
-            await insertCommand.ExecuteNonQueryAsync();
-        }
-
-        await using (var updateSettingsCommand = new NpgsqlCommand(
-            """
-            update recovery_settings
-            set device_name = @device_name,
-                last_synced_at = @last_synced_at,
-                updated_at = @updated_at
-            where user_id = @user_id
-              and device_id = @device_id
-            """,
-            connection,
-            transaction))
-        {
-            updateSettingsCommand.Parameters.AddWithValue("device_name", NormalizeOptionalValue(request.DeviceName, 200));
-            updateSettingsCommand.Parameters.AddWithValue("last_synced_at", DateTimeOffset.UtcNow);
-            updateSettingsCommand.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
-            updateSettingsCommand.Parameters.AddWithValue("user_id", user.Id);
-            updateSettingsCommand.Parameters.AddWithValue("device_id", device.Id);
-            await updateSettingsCommand.ExecuteNonQueryAsync();
-        }
-
-        await transaction.CommitAsync();
-
-        return Results.Ok(new
-        {
-            message = "Emergency recovery file list saved successfully.",
-            entriesSaved = normalizedEntries.Count,
-        });
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine("Recovery file list save failed:");
-        Console.WriteLine(ex);
-        return Results.Json(
-            new { message = "Unable to save emergency recovery file list right now." },
-            statusCode: StatusCodes.Status500InternalServerError);
-    }
-});
+app.MapPost("/api/recovery/upload", SaveRecoveryFileListingsAsync);
+app.MapPost("/api/recovery/file-listings", SaveRecoveryFileListingsAsync);
 
 app.MapGet("/api/recovery/file-list", async (HttpRequest request) =>
 {
@@ -1133,6 +977,166 @@ app.MapGet("/api/recovery/{deviceId:guid}", async (HttpRequest request, Guid dev
 });
 
 app.Run();
+
+async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest request)
+{
+    if (request is null)
+    {
+        return Results.BadRequest(new { message = "Recovery file list payload is required." });
+    }
+
+    var setupCode = NormalizeSetupCode(request.SetupCode ?? request.AgentSetupCode);
+    if (!IsValidSetupCode(setupCode))
+    {
+        return Results.BadRequest(new { message = "Agent setup code format is invalid." });
+    }
+
+    if (!TryValidateRecoveryFileListRequest(request, out var validationMessage))
+    {
+        return Results.BadRequest(new { message = validationMessage });
+    }
+
+    try
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var user = await TryGetUserBySetupCodeAsync(connection, setupCode);
+        if (user is null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var normalizedDeviceId = NormalizeOptionalValue(request.DeviceId, 128);
+        var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, normalizedDeviceId);
+        device ??= await TryGetLatestOwnedDeviceAsync(
+            connection,
+            user.Id,
+            NormalizeOptionalValueOrEmpty(request.DeviceName, 200));
+        if (device is null)
+        {
+            return Results.BadRequest(new { message = "Device must be connected before recovery files can be scanned." });
+        }
+
+        var settings = await TryGetRecoverySettingsAsync(connection, user.Id, device.Id);
+        if (settings is null || !settings.Enabled)
+        {
+            return Results.BadRequest(new { message = "Emergency recovery mode is not enabled for this device." });
+        }
+
+        var approvedLocations = DeserializeApprovedLocations(settings.ApprovedLocationsJson);
+        var normalizedEntries = FilterRecoveryEntriesWithinApprovedLocations(
+            NormalizeRecoveryFileEntries(request.Entries),
+            approvedLocations);
+        var now = DateTimeOffset.UtcNow;
+
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var deleteCommand = new NpgsqlCommand(
+            """
+            delete from recovery_file_listings
+            where user_id = @user_id
+              and device_id = @device_id
+            """,
+            connection,
+            transaction))
+        {
+            deleteCommand.Parameters.AddWithValue("user_id", user.Id);
+            deleteCommand.Parameters.AddWithValue("device_id", device.Id);
+            await deleteCommand.ExecuteNonQueryAsync();
+        }
+
+        foreach (var entry in normalizedEntries)
+        {
+            await using var insertCommand = new NpgsqlCommand(
+                """
+                insert into recovery_file_listings (
+                    id,
+                    user_id,
+                    device_id,
+                    file_name,
+                    full_path,
+                    extension,
+                    size_bytes,
+                    last_modified_at,
+                    is_directory,
+                    drive_letter,
+                    created_at,
+                    updated_at
+                )
+                values (
+                    @id,
+                    @user_id,
+                    @device_id,
+                    @file_name,
+                    @full_path,
+                    @extension,
+                    @size_bytes,
+                    @last_modified_at,
+                    @is_directory,
+                    @drive_letter,
+                    @created_at,
+                    @updated_at
+                )
+                """,
+                connection,
+                transaction);
+
+            insertCommand.Parameters.AddWithValue("id", Guid.NewGuid());
+            insertCommand.Parameters.AddWithValue("user_id", user.Id);
+            insertCommand.Parameters.AddWithValue("device_id", device.Id);
+            insertCommand.Parameters.AddWithValue("file_name", entry.FileName ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("full_path", entry.FullPath ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("extension", entry.Extension ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("size_bytes", entry.SizeBytes);
+            insertCommand.Parameters.AddWithValue("last_modified_at",
+                string.IsNullOrWhiteSpace(entry.LastModified)
+                    ? DBNull.Value
+                    : DateTimeOffset.Parse(entry.LastModified));
+            insertCommand.Parameters.AddWithValue("is_directory", entry.IsDirectory);
+            insertCommand.Parameters.AddWithValue("drive_letter", entry.DriveLetter ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("created_at", now);
+            insertCommand.Parameters.AddWithValue("updated_at", now);
+            await insertCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var updateSettingsCommand = new NpgsqlCommand(
+            """
+            update recovery_settings
+            set device_name = @device_name,
+                last_synced_at = @last_synced_at,
+                updated_at = @updated_at
+            where user_id = @user_id
+              and device_id = @device_id
+            """,
+            connection,
+            transaction))
+        {
+            updateSettingsCommand.Parameters.AddWithValue("device_name", NormalizeOptionalValue(request.DeviceName, 200));
+            updateSettingsCommand.Parameters.AddWithValue("last_synced_at", now);
+            updateSettingsCommand.Parameters.AddWithValue("updated_at", now);
+            updateSettingsCommand.Parameters.AddWithValue("user_id", user.Id);
+            updateSettingsCommand.Parameters.AddWithValue("device_id", device.Id);
+            await updateSettingsCommand.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+
+        return Results.Ok(new
+        {
+            message = "Emergency recovery file list saved successfully.",
+            entriesSaved = normalizedEntries.Count,
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Recovery file list save failed:");
+        Console.WriteLine(ex);
+        return Results.Json(
+            new { message = "Unable to save emergency recovery file list right now." },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+}
 
 static HashSet<string> BuildAllowedOrigins(string? configuredFrontendOrigin)
 {

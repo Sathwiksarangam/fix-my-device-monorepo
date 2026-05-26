@@ -438,8 +438,13 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     return Icons.insert_drive_file_rounded;
   }
 
-  Widget _buildStatusCard(BuildContext context, RecoverySettings? settings) {
+  Widget _buildStatusCard(
+    BuildContext context,
+    RecoverySettings? settings,
+    int totalFiles,
+  ) {
     final bool enabled = settings?.enabled == true;
+    final int folderCount = settings?.approvedLocations.length ?? 0;
 
     return Card(
       child: Padding(
@@ -471,10 +476,25 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
             const Text(
               'File transfer is coming next. This version prepares the recovery file list only.',
             ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: <Widget>[
+                _buildInfoPill('Total Files', totalFiles.toString()),
+                _buildInfoPill('Approved Folders', folderCount.toString()),
+                _buildInfoPill(
+                  'Last Scan Time',
+                  (settings?.lastSyncedAt ?? '').isEmpty
+                      ? 'Not scanned yet'
+                      : _formatModifiedDate(settings!.lastSyncedAt),
+                ),
+              ],
+            ),
             if ((settings?.lastSyncedAt ?? '').isNotEmpty) ...<Widget>[
               const SizedBox(height: 10),
               Text(
-                'Last synced: ${_formatModifiedDate(settings!.lastSyncedAt)}',
+                'Last scan time: ${_formatModifiedDate(settings!.lastSyncedAt)}',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Colors.black54,
                     ),
@@ -609,7 +629,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                       const SizedBox(height: 4),
                       Text(
                         files.isEmpty
-                            ? 'Run the agent sync after enabling recovery.'
+                            ? 'Run the agent and sync Emergency Recovery first.'
                             : 'Browse synced recovery metadata like a simple file explorer.',
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               color: Colors.black54,
@@ -644,7 +664,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                           const SizedBox(height: 4),
                           Text(
                             files.isEmpty
-                                ? 'Run the agent sync after enabling recovery.'
+                                ? 'Run the agent and sync Emergency Recovery first.'
                                 : 'Browse synced recovery metadata like a simple file explorer.',
                             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                   color: Colors.black54,
@@ -1073,7 +1093,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _buildStatusCard(context, pageData.settings),
+              _buildStatusCard(context, pageData.settings, pageData.files.length),
               const SizedBox(height: 16),
               _buildSelectableLocationsCard(context),
               const SizedBox(height: 16),
@@ -1081,6 +1101,34 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildInfoPill(String label, String value) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F7FB),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: const Color(0xFFD9E2EC)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: RichText(
+          text: TextSpan(
+            style: const TextStyle(
+              color: Color(0xFF243B53),
+              fontSize: 13,
+            ),
+            children: <TextSpan>[
+              TextSpan(
+                text: '$label: ',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              TextSpan(text: value),
+            ],
+          ),
+        ),
       ),
     );
   }

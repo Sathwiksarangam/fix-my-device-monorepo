@@ -160,6 +160,10 @@ class ApiDeviceService {
     return inventory.files;
   }
 
+  Future<List<RecoveryFileEntry>> getRecoveryFiles(String deviceId) async {
+    return getRecoveryFileList(deviceId);
+  }
+
   Future<RecoveryInventory> getRecoveryInventory(String deviceId) async {
     final token = _requireToken();
 

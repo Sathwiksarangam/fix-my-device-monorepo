@@ -183,21 +183,33 @@ class DeviceDetailsScreen extends StatelessWidget {
 
               const SizedBox(height: 12),
 
-              FutureBuilder<RecoveryInventory>(
-                future: ApiDeviceService().getRecoveryInventory('${device['id']}'),
+              FutureBuilder<List<dynamic>>(
+                future: Future.wait<dynamic>([
+                  ApiDeviceService().getRecoverySettings('${device['id']}'),
+                  ApiDeviceService().getRecoveryFiles('${device['id']}'),
+                ]),
                 builder: (context, recoverySnapshot) {
-                  final RecoveryInventory? inventory = recoverySnapshot.data;
                   final bool isLoadingRecovery =
                       recoverySnapshot.connectionState == ConnectionState.waiting;
                   final bool hasRecoveryError = recoverySnapshot.hasError;
+                  final RecoverySettings? settings = recoverySnapshot.hasData
+                      ? recoverySnapshot.data![0] as RecoverySettings
+                      : null;
+                  final List<RecoveryFileEntry> files = recoverySnapshot.hasData
+                      ? recoverySnapshot.data![1] as List<RecoveryFileEntry>
+                      : <RecoveryFileEntry>[];
                   final String lastScanTime =
-                      inventory?.lastScanTime.isNotEmpty == true
-                          ? inventory!.lastScanTime
+                      (settings?.lastSyncedAt ?? '').isNotEmpty
+                          ? settings!.lastSyncedAt
                           : 'Not scanned yet';
-                  final String totalFiles = inventory?.totalFiles.toString() ?? '0';
-                  final String recoveryStatus = inventory?.enabled == true
-                      ? 'Enabled'
-                      : 'Not Enabled';
+                  final String totalFiles = files.length.toString();
+                  final String recoveryStatus =
+                      settings?.enabled == true ? 'Enabled' : 'Not Enabled';
+                  final bool showSetupHint =
+                      settings != null &&
+                      !settings.enabled &&
+                      files.isEmpty &&
+                      settings.lastSyncedAt.isEmpty;
 
                   return Card(
                     child: Padding(
@@ -227,6 +239,12 @@ class DeviceDetailsScreen extends StatelessWidget {
                               label: 'Last Scan Time',
                               value: lastScanTime,
                             ),
+                            if (showSetupHint) ...[
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Emergency Recovery is not enabled yet. Open the Fix My Device Agent and choose Emergency Recovery setup.',
+                              ),
+                            ],
                           ],
                           const SizedBox(height: 14),
                           Wrap(

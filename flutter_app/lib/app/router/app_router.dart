@@ -6,6 +6,7 @@ import '../../features/auth/presentation/screens/login_screen.dart';
 import '../../features/dashboard/presentation/screens/dashboard_screen.dart';
 import '../../features/devices/presentation/screens/device_details_screen.dart';
 import '../../features/devices/presentation/screens/devices_list_screen.dart';
+import '../../features/files/presentation/screens/emergency_recovery_screen.dart';
 import '../../features/files/presentation/screens/file_browser_screen.dart';
 import '../../features/files/presentation/screens/file_transfer_screen.dart';
 import '../../features/settings/presentation/screens/settings_screen.dart';
@@ -114,7 +115,7 @@ class AppRouter {
         path: AppRoutes.emergencyRecovery,
         builder: (BuildContext context, GoRouterState state) {
           final String? deviceId = state.uri.queryParameters['id'];
-          return FileBrowserScreen(deviceId: deviceId);
+          return EmergencyRecoveryScreen(deviceId: deviceId);
         },
       ),
       GoRoute(
