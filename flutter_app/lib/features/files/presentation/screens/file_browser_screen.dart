@@ -490,61 +490,85 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            final bool stackedHeader = constraints.maxWidth < 760;
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Expanded(
-                  child: Text(
+                if (stackedHeader) ...<Widget>[
+                  Text(
                     'Approved Recovery Locations',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w800,
                         ),
                   ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ActionButton(
+                      label: _isSaving ? 'Saving...' : 'Save Selection',
+                      icon: Icons.save_rounded,
+                      onPressed: _isSaving ? () {} : _saveRecoverySelection,
+                    ),
+                  ),
+                ] else
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          'Approved Recovery Locations',
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w800,
+                              ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      ActionButton(
+                        label: _isSaving ? 'Saving...' : 'Save Selection',
+                        icon: Icons.save_rounded,
+                        onPressed: _isSaving ? () {} : _saveRecoverySelection,
+                      ),
+                    ],
+                  ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Choose which folders and non-system drives the agent is allowed to index for recovery metadata.',
                 ),
-                ActionButton(
-                  label: _isSaving ? 'Saving...' : 'Save Selection',
-                  icon: Icons.save_rounded,
-                  onPressed: _isSaving ? () {} : _saveRecoverySelection,
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 14,
+                  runSpacing: 14,
+                  children: _draftLocations.map((RecoveryApprovedLocation location) {
+                    return SizedBox(
+                      width: 280,
+                      child: CheckboxListTile(
+                        value: _draftSelections[location.fullPath] ?? false,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                        title: Text(
+                          location.label,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          _describeLocationPath(location),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onChanged: (bool? value) {
+                          setState(() {
+                            _draftSelections[location.fullPath] = value ?? false;
+                          });
+                        },
+                      ),
+                    );
+                  }).toList(),
                 ),
               ],
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Choose which folders and non-system drives the agent is allowed to index for recovery metadata.',
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 14,
-              runSpacing: 14,
-              children: _draftLocations.map((RecoveryApprovedLocation location) {
-                return SizedBox(
-                  width: 280,
-                  child: CheckboxListTile(
-                    value: _draftSelections[location.fullPath] ?? false,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                    title: Text(
-                      location.label,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: Text(
-                      _describeLocationPath(location),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onChanged: (bool? value) {
-                      setState(() {
-                        _draftSelections[location.fullPath] = value ?? false;
-                      });
-                    },
-                  ),
-                );
-              }).toList(),
-            ),
-          ],
+            );
+          },
         ),
       ),
     );
@@ -568,10 +592,12 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: Column(
+            LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints constraints) {
+                final bool stackedHeader = constraints.maxWidth < 760;
+
+                if (stackedHeader) {
+                  return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Text(
@@ -589,16 +615,54 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                               color: Colors.black54,
                             ),
                       ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ActionButton(
+                          label: 'Refresh File List',
+                          icon: Icons.refresh_rounded,
+                          onPressed: _refresh,
+                          isPrimary: false,
+                        ),
+                      ),
                     ],
-                  ),
-                ),
-                ActionButton(
-                  label: 'Refresh File List',
-                  icon: Icons.refresh_rounded,
-                  onPressed: _refresh,
-                  isPrimary: false,
-                ),
-              ],
+                  );
+                }
+
+                return Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            'Recovery File Browser',
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            files.isEmpty
+                                ? 'Run the agent sync after enabling recovery.'
+                                : 'Browse synced recovery metadata like a simple file explorer.',
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                  color: Colors.black54,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ActionButton(
+                      label: 'Refresh File List',
+                      icon: Icons.refresh_rounded,
+                      onPressed: _refresh,
+                      isPrimary: false,
+                    ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 16),
             Wrap(

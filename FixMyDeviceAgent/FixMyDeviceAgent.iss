@@ -18,7 +18,7 @@ WizardStyle=modern
 Source: "bin\Release\net10.0-windows\win-x64\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Fix My Device Agent"; ValueData: """{app}\FixMyDeviceAgent.exe"""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Fix My Device Agent"; ValueData: """{app}\FixMyDeviceAgent.exe"" --background"; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\Fix My Device Agent"; Filename: "{app}\FixMyDeviceAgent.exe"

@@ -14,7 +14,7 @@ public sealed class StartupRegistrationService
             using var runKey = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true) ??
                                Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
 
-            runKey?.SetValue(ValueName, $"\"{Application.ExecutablePath}\"");
+            runKey?.SetValue(ValueName, $"\"{Application.ExecutablePath}\" --background");
         }
         catch
         {

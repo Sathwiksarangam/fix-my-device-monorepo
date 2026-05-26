@@ -7,6 +7,11 @@ namespace FixMyDeviceAgent;
 
 internal static class Program
 {
+    private const string BackgroundArgument = "--background";
+    private const string StartupArgument = "--startup";
+    private const string SetupArgument = "--setup";
+    private const string ReconnectArgument = "--reconnect";
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AllocConsole();
 
@@ -16,28 +21,53 @@ internal static class Program
     [STAThread]
     private static async Task Main(string[] args)
     {
-        EnsureConsoleWindow();
-        Console.Title = "Fix My Device Agent";
-        Console.OutputEncoding = Encoding.UTF8;
+        var runInBackground = args.Any(arg =>
+            string.Equals(arg, BackgroundArgument, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(arg, StartupArgument, StringComparison.OrdinalIgnoreCase));
+        var openReconnectOnLaunch = args.Any(arg =>
+            string.Equals(arg, SetupArgument, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(arg, ReconnectArgument, StringComparison.OrdinalIgnoreCase));
+
+        var mutexName = runInBackground
+            ? "FixMyDeviceAgent.BackgroundInstance"
+            : "FixMyDeviceAgent.ConsoleInstance";
 
         using var singleInstanceMutex = new Mutex(
             initiallyOwned: true,
-            name: "FixMyDeviceAgent.SingleInstance",
+            name: mutexName,
             createdNew: out var isFirstInstance);
 
         if (!isFirstInstance)
         {
+            if (runInBackground)
+            {
+                return;
+            }
+
+            EnsureConsoleWindow();
+            Console.Title = "Fix My Device Agent";
+            Console.OutputEncoding = Encoding.UTF8;
             WriteSectionTitle("Fix My Device Agent");
             Console.WriteLine("Fix My Device Agent is already running.");
             PressEnterToContinue("Press Enter to close");
             return;
         }
 
+        if (runInBackground)
+        {
+            ApplicationConfiguration.Initialize();
+            using var trayContext = new AgentTrayApplicationContext(openReconnectOnLaunch);
+            Application.Run(trayContext);
+            return;
+        }
+
+        EnsureConsoleWindow();
+        Console.Title = "Fix My Device Agent";
+        Console.OutputEncoding = Encoding.UTF8;
+
         using var runtime = new AgentRuntimeService();
 
-        if (args.Any(arg =>
-                string.Equals(arg, "--setup", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(arg, "--reconnect", StringComparison.OrdinalIgnoreCase)))
+        if (openReconnectOnLaunch)
         {
             await ReconnectAgentAsync(runtime);
         }

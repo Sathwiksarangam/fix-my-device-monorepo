@@ -655,6 +655,10 @@ app.MapPost("/api/recovery/settings", async (HttpRequest httpRequest, RecoverySe
             connection,
             user.Id,
             NormalizeOptionalValueOrEmpty(request.DeviceId, 128));
+        device ??= await TryGetLatestOwnedDeviceAsync(
+            connection,
+            user.Id,
+            NormalizeOptionalValueOrEmpty(request.DeviceName, 200));
         if (device is null)
         {
             return Results.BadRequest(new { message = "Device must be connected before recovery can be enabled." });
@@ -831,6 +835,10 @@ app.MapPost("/api/recovery/upload", async (RecoveryFileListRequest request) =>
 
         var normalizedDeviceId = NormalizeOptionalValue(request.DeviceId, 128);
         var device = await TryGetOwnedDeviceByHardwareIdAsync(connection, user.Id, normalizedDeviceId);
+        device ??= await TryGetLatestOwnedDeviceAsync(
+            connection,
+            user.Id,
+            NormalizeOptionalValueOrEmpty(request.DeviceName, 200));
         if (device is null)
         {
             return Results.BadRequest(new { message = "Device must be connected before recovery files can be scanned." });
@@ -1307,6 +1315,39 @@ static async Task<OwnedDeviceRecord?> TryResolveRecoveryDeviceAsync(
     }
 
     return await TryGetOwnedDeviceByHardwareIdAsync(connection, userId, rawDeviceIdentifier);
+}
+
+static async Task<OwnedDeviceRecord?> TryGetLatestOwnedDeviceAsync(
+    NpgsqlConnection connection,
+    Guid userId,
+    string preferredDeviceName)
+{
+    await using var command = new NpgsqlCommand(
+        """
+        select id, user_id, device_id, device_name
+        from devices
+        where user_id = @user_id
+        order by
+            case
+                when @preferred_device_name <> '' and lower(device_name) = lower(@preferred_device_name) then 0
+                else 1
+            end,
+            last_seen_at desc nulls last,
+            updated_at desc nulls last
+        limit 1
+        """,
+        connection);
+    command.Parameters.AddWithValue("user_id", userId);
+    command.Parameters.AddWithValue("preferred_device_name", preferredDeviceName);
+
+    await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+    return await reader.ReadAsync()
+        ? new OwnedDeviceRecord(
+            reader.GetGuid(reader.GetOrdinal("id")),
+            reader.GetGuid(reader.GetOrdinal("user_id")),
+            reader["device_id"]?.ToString() ?? string.Empty,
+            reader["device_name"]?.ToString() ?? "Unknown")
+        : null;
 }
 
 static async Task<RecoverySettingsStorageRecord?> TryGetRecoverySettingsAsync(NpgsqlConnection connection, Guid userId, Guid deviceId)
