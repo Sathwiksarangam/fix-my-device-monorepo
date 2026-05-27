@@ -67,6 +67,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   String? _draftDeviceId;
   String _draftDeviceName = '';
   bool _isSaving = false;
+  bool _isQueuingDownloads = false;
   List<RecoveryApprovedLocation> _draftLocations = <RecoveryApprovedLocation>[];
   Map<String, bool> _draftSelections = <String, bool>{};
   String? _currentRootKey;
@@ -240,6 +241,64 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     setState(() {
       _pageFuture = _loadPageData();
     });
+  }
+
+  List<String> get _selectedDownloadablePaths {
+    return _checkedPaths.toList(growable: false);
+  }
+
+  Future<void> _queueSelectedDownloads() async {
+    final String? deviceId = _draftDeviceId ?? _selectedDeviceId;
+    final List<String> selectedPaths = _selectedDownloadablePaths;
+
+    if (deviceId == null || selectedPaths.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _isQueuingDownloads = true;
+    });
+
+    try {
+      for (final String path in selectedPaths) {
+        await ApiDeviceService().requestRecoveryDownload(
+          deviceId: deviceId,
+          filePath: path,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            selectedPaths.length == 1
+                ? 'Download request queued. Open File Transfer to watch it move to Ready.'
+                : '${selectedPaths.length} download requests queued. Open File Transfer to watch them move to Ready.',
+          ),
+        ),
+      );
+
+      setState(() {
+        _checkedPaths.clear();
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isQueuingDownloads = false;
+        });
+      }
+    }
   }
 
   Future<void> _saveRecoverySelection() async {
@@ -714,6 +773,16 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                         fontWeight: FontWeight.w700,
                       ),
                 ),
+                if (_selectedDownloadablePaths.isNotEmpty)
+                  ActionButton(
+                    label: _isQueuingDownloads
+                        ? 'Queueing...'
+                        : 'Download Selected',
+                    icon: Icons.download_rounded,
+                    onPressed:
+                        _isQueuingDownloads ? () {} : _queueSelectedDownloads,
+                    isPrimary: false,
+                  ),
               ],
             ),
             if (_checkedPaths.isNotEmpty) ...<Widget>[
@@ -727,7 +796,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                   border: Border.all(color: const Color(0xFFD9E2EC)),
                 ),
                 child: const Text(
-                  'Transfer coming next. Select files here, then use File Transfer once completed transfer download is ready.',
+                  'Selected files can be queued now. Use File Transfer to watch the job move from Pending to Ready, then download it there.',
                 ),
               ),
             ],
@@ -1463,7 +1532,7 @@ class _RecoveryExplorerModel {
           fileCount: fileCount,
           detail: fileCount > 0
               ? '$fileCount files'
-              : (hasScan ? 'No files found' : 'Run the agent sync to load this folder'),
+              : (hasScan ? 'Synced, no files found' : 'Run the agent sync to load this folder'),
         );
       }).toList();
     }
@@ -1495,7 +1564,7 @@ class _RecoveryExplorerModel {
         fileCount: fileCount,
         detail: fileCount > 0
             ? '$fileCount files'
-            : (hasScan ? 'No files found' : 'Run the agent sync to load this folder'),
+            : (hasScan ? 'Synced, no files found' : 'Run the agent sync to load this folder'),
       );
     };
   }

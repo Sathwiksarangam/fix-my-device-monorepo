@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
@@ -24,6 +25,7 @@ class FileTransferScreen extends StatefulWidget {
 
 class _FileTransferScreenState extends State<FileTransferScreen> {
   late Future<_TransferPageData> _pageFuture;
+  Timer? _refreshTimer;
   String? _selectedDeviceId;
   String _destinationPath = '';
   RecoveryFileEntry? _selectedRecoveryFile;
@@ -35,6 +37,19 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
     super.initState();
     _selectedDeviceId = widget.deviceId;
     _pageFuture = _loadPageData();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted) {
+        return;
+      }
+
+      _refresh();
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<_TransferPageData> _loadPageData() async {
@@ -488,6 +503,13 @@ class _FileTransferScreenState extends State<FileTransferScreen> {
                                 ? () {}
                                 : _submitDownloadFromDevice,
                             isPrimary: false,
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Queued recovery downloads move through Pending, In Progress, and Ready here.',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: Colors.black54,
+                                ),
                           ),
                         ],
                       ),
