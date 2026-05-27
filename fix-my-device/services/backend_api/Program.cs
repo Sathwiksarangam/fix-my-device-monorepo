@@ -42,6 +42,7 @@ Directory.CreateDirectory(transferStorageRoot);
 var agentInstallerExternalUrl = Environment.GetEnvironmentVariable("AGENT_INSTALLER_EXTERNAL_URL");
 var agentInstallerPath = Path.Combine(builder.Environment.ContentRootPath, "downloads", "FixMyDeviceSetup.exe");
 await EnsureTransferTablesAsync(connectionString);
+await EnsureRecoveryFileListingColumnsAsync(connectionString);
 
 var app = builder.Build();
 
@@ -865,6 +866,8 @@ app.MapGet("/api/recovery/file-list", async (HttpRequest request) =>
             select
                 file_name,
                 full_path,
+                root_label,
+                root_path,
                 extension,
                 size_bytes,
                 last_modified_at,
@@ -885,6 +888,8 @@ app.MapGet("/api/recovery/file-list", async (HttpRequest request) =>
             files.Add(new RecoveryFileRecord(
                 reader["file_name"]?.ToString() ?? "Unknown",
                 reader["full_path"]?.ToString() ?? string.Empty,
+                reader["root_label"]?.ToString() ?? string.Empty,
+                reader["root_path"]?.ToString() ?? string.Empty,
                 reader["extension"]?.ToString() ?? string.Empty,
                 reader["size_bytes"] is long sizeValue ? sizeValue : 0,
                 ToIsoString(reader["last_modified_at"]),
@@ -955,6 +960,8 @@ app.MapGet("/api/recovery/{deviceId:guid}", async (HttpRequest request, Guid dev
             select
                 file_name,
                 full_path,
+                root_label,
+                root_path,
                 extension,
                 size_bytes,
                 last_modified_at,
@@ -976,6 +983,8 @@ app.MapGet("/api/recovery/{deviceId:guid}", async (HttpRequest request, Guid dev
                 files.Add(new RecoveryFileRecord(
                     reader["file_name"]?.ToString() ?? "Unknown",
                     reader["full_path"]?.ToString() ?? string.Empty,
+                    reader["root_label"]?.ToString() ?? string.Empty,
+                    reader["root_path"]?.ToString() ?? string.Empty,
                     reader["extension"]?.ToString() ?? string.Empty,
                     reader["size_bytes"] is long sizeValue ? sizeValue : 0,
                     ToIsoString(reader["last_modified_at"]),
@@ -1313,7 +1322,18 @@ app.MapGet("/api/transfers/{jobId:guid}/download", async (HttpRequest request, G
             return Results.NotFound(new { message = "The transfer file is no longer available." });
         }
 
-        return Results.File(filePath, "application/octet-stream", job.StorageFileName);
+        var downloadFileName = string.IsNullOrWhiteSpace(job.StorageFileName)
+            ? (string.IsNullOrWhiteSpace(job.RequestedFileName)
+                ? Path.GetFileName(filePath)
+                : job.RequestedFileName)
+            : job.StorageFileName;
+        var contentType = ResolveContentType(downloadFileName, contentTypeProvider);
+
+        return Results.File(
+            filePath,
+            contentType,
+            fileDownloadName: downloadFileName,
+            enableRangeProcessing: true);
     }
     catch (Exception ex)
     {
@@ -1652,6 +1672,8 @@ async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest reques
                     device_id,
                     file_name,
                     full_path,
+                    root_label,
+                    root_path,
                     extension,
                     size_bytes,
                     last_modified_at,
@@ -1666,6 +1688,8 @@ async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest reques
                     @device_id,
                     @file_name,
                     @full_path,
+                    @root_label,
+                    @root_path,
                     @extension,
                     @size_bytes,
                     @last_modified_at,
@@ -1683,6 +1707,8 @@ async Task<IResult> SaveRecoveryFileListingsAsync(RecoveryFileListRequest reques
             insertCommand.Parameters.AddWithValue("device_id", device.Id);
             insertCommand.Parameters.AddWithValue("file_name", entry.FileName ?? string.Empty);
             insertCommand.Parameters.AddWithValue("full_path", entry.FullPath ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("root_label", entry.RootLabel ?? string.Empty);
+            insertCommand.Parameters.AddWithValue("root_path", entry.RootPath ?? string.Empty);
             insertCommand.Parameters.AddWithValue("extension", entry.Extension ?? string.Empty);
             insertCommand.Parameters.AddWithValue("size_bytes", entry.SizeBytes);
             insertCommand.Parameters.AddWithValue("last_modified_at",
@@ -1763,6 +1789,24 @@ static async Task EnsureTransferTablesAsync(string connectionString)
 
         create index if not exists idx_transfer_jobs_device_status
             on transfer_jobs(device_id, status, created_at asc);
+        """,
+        connection);
+
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task EnsureRecoveryFileListingColumnsAsync(string connectionString)
+{
+    await using var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync();
+
+    await using var command = new NpgsqlCommand(
+        """
+        alter table if exists recovery_file_listings
+            add column if not exists root_label text not null default '';
+
+        alter table if exists recovery_file_listings
+            add column if not exists root_path text not null default '';
         """,
         connection);
 
@@ -2360,7 +2404,7 @@ static bool TryValidateRecoveryFileListRequest(RecoveryFileListRequest request, 
         return false;
     }
 
-    if (request.Entries.Count > 5000)
+    if (request.Entries.Count > 50000)
     {
         message = "Too many recovery file entries were submitted.";
         return false;
@@ -2370,6 +2414,8 @@ static bool TryValidateRecoveryFileListRequest(RecoveryFileListRequest request, 
     {
         if (!ValidateRequiredField("File name", entry.FileName, 260, out message) ||
             !ValidateRequiredField("Full path", entry.FullPath, 400, out message) ||
+            !ValidateRequiredField("Root label", entry.RootLabel, 128, out message) ||
+            !ValidateRequiredField("Root path", entry.RootPath, 400, out message) ||
             !ValidateOptionalField("Extension", entry.Extension, 32, out message) ||
             !ValidateOptionalField("Drive letter", entry.DriveLetter, 16, out message))
         {
@@ -2523,6 +2569,8 @@ static List<RecoveryFileRecord> NormalizeRecoveryFileEntries(List<RecoveryFileRe
         .Select(entry => new RecoveryFileRecord(
             NormalizeOptionalValue(entry.FileName, 260),
             NormalizeRecoveryPath(entry.FullPath),
+            NormalizeOptionalValue(entry.RootLabel, 128),
+            NormalizeRecoveryPath(entry.RootPath),
             NormalizeOptionalValue(entry.Extension, 32),
             entry.SizeBytes < 0 ? 0 : entry.SizeBytes,
             NormalizeOptionalValueOrEmpty(entry.LastModified, 64),
@@ -2543,18 +2591,120 @@ static List<RecoveryFileRecord> FilterRecoveryEntriesWithinApprovedLocations(
         .ToList();
 
     return entries
-        .Where(entry =>
+        .Select(entry =>
         {
             var normalizedPath = NormalizeRecoveryPath(entry.FullPath);
             if (string.IsNullOrWhiteSpace(normalizedPath) || IsUnsafeRecoveryPath(normalizedPath))
             {
-                return false;
+                return null;
             }
 
-            return approvedRoots.Any(root => IsEntryWithinApprovedRoot(normalizedPath, root));
+            var approvedRoot = approvedRoots.FirstOrDefault(root => IsEntryWithinApprovedRoot(normalizedPath, root));
+            if (string.IsNullOrWhiteSpace(approvedRoot))
+            {
+                return null;
+            }
+
+            var normalizedRootPath = NormalizeRecoveryPath(entry.RootPath);
+            if (string.IsNullOrWhiteSpace(normalizedRootPath) ||
+                !IsEntryWithinApprovedRoot(normalizedPath, normalizedRootPath))
+            {
+                normalizedRootPath = BuildRootPathForEntry(normalizedPath);
+            }
+
+            var normalizedRootLabel = NormalizeOptionalValue(entry.RootLabel, 128);
+            if (string.Equals(normalizedRootLabel, "Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                normalizedRootLabel = BuildRootLabelForEntry(normalizedRootPath);
+            }
+
+            return new RecoveryFileRecord(
+                entry.FileName,
+                normalizedPath,
+                normalizedRootLabel,
+                normalizedRootPath,
+                entry.Extension,
+                entry.SizeBytes,
+                entry.LastModified,
+                entry.IsDirectory,
+                entry.DriveLetter);
         })
+        .Where(entry => entry is not null)
+        .Select(entry => entry!)
         .DistinctBy(entry => entry.FullPath, StringComparer.OrdinalIgnoreCase)
         .ToList();
+}
+
+static string BuildRootPathForEntry(string fullPath)
+{
+    var normalizedPath = NormalizeRecoveryPath(fullPath);
+    if (string.IsNullOrWhiteSpace(normalizedPath))
+    {
+        return string.Empty;
+    }
+
+    var segments = normalizedPath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+    if (segments.Length == 0)
+    {
+        return normalizedPath;
+    }
+
+    if (segments[0].Length == 2 &&
+        segments[0][1] == ':' &&
+        !segments[0].Equals("C:", StringComparison.OrdinalIgnoreCase))
+    {
+        return segments[0].ToUpperInvariant() + "\\";
+    }
+
+    if (segments.Length >= 4 &&
+        segments[0].Equals("C:", StringComparison.OrdinalIgnoreCase) &&
+        segments[1].Equals("Users", StringComparison.OrdinalIgnoreCase))
+    {
+        var folderIndex = segments[2].StartsWith("OneDrive", StringComparison.OrdinalIgnoreCase) ? 4 : 3;
+        if (segments.Length > folderIndex)
+        {
+            var candidate = segments[folderIndex];
+            if (candidate.Equals("Desktop", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals("Documents", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals("Downloads", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals("Pictures", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals("Videos", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Equals("Music", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Join("\\", segments.Take(folderIndex + 1));
+            }
+        }
+    }
+
+    if (segments[0].Length == 2 && segments[0][1] == ':')
+    {
+        return segments[0].ToUpperInvariant() + "\\";
+    }
+
+    return normalizedPath;
+}
+
+static string BuildRootLabelForEntry(string rootPath)
+{
+    var normalizedRootPath = NormalizeRecoveryPath(rootPath);
+    if (string.IsNullOrWhiteSpace(normalizedRootPath))
+    {
+        return "Unknown";
+    }
+
+    var trimmed = normalizedRootPath.TrimEnd('\\');
+    var segments = trimmed.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+    if (segments.Length == 0)
+    {
+        return normalizedRootPath;
+    }
+
+    if (segments.Length == 1 && segments[0].Length == 2 && segments[0][1] == ':')
+    {
+        return segments[0].ToUpperInvariant();
+    }
+
+    return segments[^1];
 }
 
 static bool PathStartsWithRoot(string fullPath, string root)
@@ -2819,6 +2969,19 @@ static string ToIsoString(object? value)
     };
 }
 
+static string ResolveContentType(string fileName, FileExtensionContentTypeProvider contentTypeProvider)
+{
+    var safeFileName = Path.GetFileName(fileName);
+    if (!string.IsNullOrWhiteSpace(safeFileName) &&
+        contentTypeProvider.TryGetContentType(safeFileName, out var contentType) &&
+        !string.IsNullOrWhiteSpace(contentType))
+    {
+        return contentType;
+    }
+
+    return "application/octet-stream";
+}
+
 static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
 
 record RegisterRequest(string? Email, string? Password);
@@ -2951,6 +3114,8 @@ record RecoveryInventoryResponse(
 record RecoveryFileRecord(
     string? FileName,
     string? FullPath,
+    string? RootLabel,
+    string? RootPath,
     string? Extension,
     long SizeBytes,
     string? LastModified,

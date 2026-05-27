@@ -84,6 +84,8 @@ class RecoveryFileEntry {
   const RecoveryFileEntry({
     required this.fileName,
     required this.fullPath,
+    required this.rootLabel,
+    required this.rootPath,
     required this.extension,
     required this.sizeBytes,
     required this.lastModified,
@@ -93,6 +95,8 @@ class RecoveryFileEntry {
 
   final String fileName;
   final String fullPath;
+  final String rootLabel;
+  final String rootPath;
   final String extension;
   final int sizeBytes;
   final String lastModified;
@@ -105,6 +109,8 @@ class RecoveryFileEntry {
     return RecoveryFileEntry(
       fileName: json['fileName']?.toString() ?? 'Unknown',
       fullPath: json['fullPath']?.toString() ?? '',
+      rootLabel: json['rootLabel']?.toString() ?? '',
+      rootPath: json['rootPath']?.toString() ?? '',
       extension: json['extension']?.toString() ?? '',
       sizeBytes: sizeValue is int
           ? sizeValue

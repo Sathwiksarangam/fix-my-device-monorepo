@@ -302,9 +302,8 @@ class ApiDeviceService {
     }
 
     final String disposition = response.headers['content-disposition'] ?? '';
-    final RegExpMatch? match =
-        RegExp('filename="([^"]+)"').firstMatch(disposition);
-    final String fileName = match?.group(1) ?? 'FixMyDeviceDownload.bin';
+    final String fileName =
+        _extractDownloadFileName(disposition) ?? 'FixMyDeviceDownload.bin';
 
     return TransferDownload(fileName: fileName, bytes: response.bodyBytes);
   }
@@ -361,5 +360,29 @@ class ApiDeviceService {
     }
 
     return '$fallback (${response.statusCode})';
+  }
+
+  String? _extractDownloadFileName(String disposition) {
+    final RegExpMatch? utf8Match =
+        RegExp(r"filename\*=UTF-8''([^;]+)", caseSensitive: false)
+            .firstMatch(disposition);
+    if (utf8Match != null) {
+      return Uri.decodeFull(utf8Match.group(1) ?? '');
+    }
+
+    final RegExpMatch? quotedMatch =
+        RegExp(r'filename="([^"]+)"', caseSensitive: false)
+            .firstMatch(disposition);
+    if (quotedMatch != null) {
+      return quotedMatch.group(1);
+    }
+
+    final RegExpMatch? plainMatch =
+        RegExp(r'filename=([^;]+)', caseSensitive: false).firstMatch(disposition);
+    if (plainMatch != null) {
+      return plainMatch.group(1)?.trim();
+    }
+
+    return null;
   }
 }
