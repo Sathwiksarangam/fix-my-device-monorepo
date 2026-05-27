@@ -293,7 +293,7 @@ internal static class Program
 
                 Console.WriteLine();
                 Console.WriteLine("Unsupported or unsafe folder paths will be skipped automatically.");
-                Console.WriteLine("Emergency Recovery can index up to 50,000 items and reports progress every 1,000 items.");
+                Console.WriteLine("Emergency Recovery scans approved folders in batches and reports progress every 1,000 files.");
                 Console.WriteLine();
 
                 var currentConfig = await runtime.LoadAgentConfigAsync();
@@ -514,3 +514,4 @@ internal static class Program
         return normalized;
     }
 }
+

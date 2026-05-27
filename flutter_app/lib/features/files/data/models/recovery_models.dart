@@ -5,6 +5,8 @@ class RecoverySettings {
     required this.enabled,
     required this.approvedLocations,
     required this.lastSyncedAt,
+    required this.updatedAt,
+    required this.scanRequestedAt,
   });
 
   final String deviceId;
@@ -12,6 +14,8 @@ class RecoverySettings {
   final bool enabled;
   final List<RecoveryApprovedLocation> approvedLocations;
   final String lastSyncedAt;
+  final String updatedAt;
+  final String scanRequestedAt;
 
   factory RecoverySettings.fromJson(Map<String, dynamic> json) {
     final dynamic rawLocations = json['approvedLocations'];
@@ -28,6 +32,8 @@ class RecoverySettings {
           .map(RecoveryApprovedLocation.fromJson)
           .toList(),
       lastSyncedAt: json['lastSyncedAt']?.toString() ?? '',
+      updatedAt: json['updatedAt']?.toString() ?? '',
+      scanRequestedAt: json['scanRequestedAt']?.toString() ?? '',
     );
   }
 
@@ -37,6 +43,8 @@ class RecoverySettings {
     bool? enabled,
     List<RecoveryApprovedLocation>? approvedLocations,
     String? lastSyncedAt,
+    String? updatedAt,
+    String? scanRequestedAt,
   }) {
     return RecoverySettings(
       deviceId: deviceId ?? this.deviceId,
@@ -44,6 +52,8 @@ class RecoverySettings {
       enabled: enabled ?? this.enabled,
       approvedLocations: approvedLocations ?? this.approvedLocations,
       lastSyncedAt: lastSyncedAt ?? this.lastSyncedAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      scanRequestedAt: scanRequestedAt ?? this.scanRequestedAt,
     );
   }
 }

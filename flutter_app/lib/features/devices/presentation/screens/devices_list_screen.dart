@@ -21,6 +21,7 @@ class DevicesListScreen extends StatefulWidget {
 
 class _DevicesListScreenState extends State<DevicesListScreen> {
   late Future<_DevicesPageData> _devicesFuture;
+  bool _isResettingAgent = false;
 
   @override
   void initState() {
@@ -104,7 +105,70 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
     );
   }
 
-  Widget _buildReconnectHelp(String setupCode) {
+  Future<void> _resetAgentConnection(String deviceId) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Reset Agent Connection'),
+          content: const Text(
+            'This will generate a new setup code and mark the current device connection as disconnected. The user account stays intact.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Reset Agent'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isResettingAgent = true;
+    });
+
+    try {
+      final String newSetupCode =
+          await ApiDeviceService().resetAgentConnection(deviceId);
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Agent reset complete. New setup code: $newSetupCode',
+          ),
+        ),
+      );
+      _refreshDevices();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isResettingAgent = false;
+        });
+      }
+    }
+  }
+  Widget _buildReconnectHelp(String setupCode, List<dynamic> devices) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -193,6 +257,17 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
                     setupCode,
                     'Agent setup code copied.',
                   ),
+                  isPrimary: false,
+                ),
+                ActionButton(
+                  label:
+                      _isResettingAgent ? 'Resetting...' : 'Reset Agent',
+                  icon: Icons.restart_alt_rounded,
+                  onPressed: _isResettingAgent || devices.isEmpty
+                      ? () {}
+                      : () => _resetAgentConnection(
+                            '${devices.first['id'] ?? ''}',
+                          ),
                   isPrimary: false,
                 ),
               ],
@@ -337,7 +412,7 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              _buildReconnectHelp(pageData.agentSetupCode),
+              _buildReconnectHelp(pageData.agentSetupCode, devices),
               const SizedBox(height: 16),
               Wrap(
                 spacing: 12,
@@ -422,3 +497,8 @@ class _DevicesPageData {
   final List<dynamic> devices;
   final String agentSetupCode;
 }
+
+
+
+
+

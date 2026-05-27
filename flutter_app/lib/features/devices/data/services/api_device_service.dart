@@ -10,7 +10,7 @@ import '../../../files/data/models/recovery_models.dart';
 class ApiDeviceService {
   static const String baseUrl = 'https://fix-my-device-monorepo.onrender.com';
   static const String agentInstallerDownloadUrl =
-      String.fromEnvironment('FMD_AGENT_INSTALLER_URL', defaultValue: '');
+      String.fromEnvironment('FMD_AGENT_INSTALLER_URL', defaultValue: 'https://fix-my-device-monorepo.onrender.com/downloads/FixMyDeviceSetup.exe');
   static const String resetAgentCommand =
       r'Remove-Item "$env:APPDATA\Fix My Device Agent\agent-config.json" -Force -ErrorAction SilentlyContinue';
 
@@ -152,7 +152,9 @@ class ApiDeviceService {
       deviceName: deviceName,
       enabled: enabled,
       approvedLocations: approvedLocations,
-      lastSyncedAt: '',
+      lastSyncedAt: data['lastSyncedAt']?.toString() ?? '',
+      updatedAt: data['updatedAt']?.toString() ?? '',
+      scanRequestedAt: data['scanRequestedAt']?.toString() ?? '',
     );
   }
 
@@ -165,6 +167,61 @@ class ApiDeviceService {
     return getRecoveryFileList(deviceId);
   }
 
+  Future<void> requestRecoveryScan(String deviceId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/api/recovery/request-scan'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(<String, dynamic>{
+            'deviceId': deviceId,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to request a recovery scan.',
+      ));
+    }
+  }
+
+  Future<String> resetAgentConnection(String deviceId) async {
+    final token = _requireToken();
+
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/api/agent/reset'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(<String, dynamic>{
+            'deviceId': deviceId,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception(_extractErrorMessage(
+        response,
+        fallback: 'Failed to reset the agent connection.',
+      ));
+    }
+
+    final dynamic data = jsonDecode(response.body);
+    final String setupCode = data['agentSetupCode']?.toString() ?? '';
+    if (setupCode.isEmpty) {
+      throw Exception('A new setup code was not returned.');
+    }
+
+    return setupCode;
+  }
   Future<RecoveryInventory> getRecoveryInventory(String deviceId) async {
     final token = _requireToken();
 
@@ -386,3 +443,7 @@ class ApiDeviceService {
     return null;
   }
 }
+
+
+
+

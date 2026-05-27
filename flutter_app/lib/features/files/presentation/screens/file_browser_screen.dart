@@ -67,6 +67,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   String? _draftDeviceId;
   String _draftDeviceName = '';
   bool _isSaving = false;
+  bool _isRequestingScan = false;
   bool _isQueuingDownloads = false;
   List<RecoveryApprovedLocation> _draftLocations = <RecoveryApprovedLocation>[];
   Map<String, bool> _draftSelections = <String, bool>{};
@@ -331,7 +332,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Emergency Recovery selection saved. Run the agent sync next.'),
+          content: Text('Emergency Recovery selection saved. The background agent will apply it automatically.'),
         ),
       );
 
@@ -355,6 +356,47 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     }
   }
 
+  Future<void> _requestRecoveryScan() async {
+    final String? deviceId = _draftDeviceId ?? _selectedDeviceId;
+    if (deviceId == null) {
+      return;
+    }
+
+    setState(() {
+      _isRequestingScan = true;
+    });
+
+    try {
+      await ApiDeviceService().requestRecoveryScan(deviceId);
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Recovery scan requested. The background agent will pick it up automatically and refresh this page after the next sync.',
+          ),
+        ),
+      );
+      _refresh();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRequestingScan = false;
+        });
+      }
+    }
+  }
   void _openRoot(String rootKey) {
     setState(() {
       _currentRootKey = rootKey;
@@ -602,6 +644,19 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                       onPressed: _isSaving ? () {} : _saveRecoverySelection,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ActionButton(
+                      label: _isRequestingScan
+                          ? 'Requesting Scan...'
+                          : 'Start Recovery Scan',
+                      icon: Icons.play_circle_outline_rounded,
+                      onPressed:
+                          _isRequestingScan ? () {} : _requestRecoveryScan,
+                      isPrimary: false,
+                    ),
+                  ),
                 ] else
                   Row(
                     children: <Widget>[
@@ -619,6 +674,16 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
                         label: _isSaving ? 'Saving...' : 'Save Selection',
                         icon: Icons.save_rounded,
                         onPressed: _isSaving ? () {} : _saveRecoverySelection,
+                      ),
+                      const SizedBox(width: 12),
+                      ActionButton(
+                        label: _isRequestingScan
+                            ? 'Requesting Scan...'
+                            : 'Start Recovery Scan',
+                        icon: Icons.play_circle_outline_rounded,
+                        onPressed:
+                            _isRequestingScan ? () {} : _requestRecoveryScan,
+                        isPrimary: false,
                       ),
                     ],
                   ),
@@ -1813,3 +1878,8 @@ class _ExplorerNode {
     );
   }
 }
+
+
+
+
+

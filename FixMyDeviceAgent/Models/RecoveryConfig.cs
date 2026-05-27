@@ -1,8 +1,10 @@
 namespace FixMyDeviceAgent.Models;
 
-public sealed class RecoveryConfig
+public sealed record RecoveryConfig
 {
-    public required bool Enabled { get; init; }
-    public required IReadOnlyList<RecoveryApprovedLocation> ApprovedLocations { get; init; }
-    public required string UpdatedAtUtc { get; init; }
+    public bool Enabled { get; init; }
+    public IReadOnlyList<RecoveryApprovedLocation> ApprovedLocations { get; init; } = [];
+    public string UpdatedAtUtc { get; init; } = string.Empty;
+    public string LastSyncedAtUtc { get; init; } = string.Empty;
+    public string LastScanRequestedAtUtc { get; init; } = string.Empty;
 }

@@ -185,11 +185,7 @@ class _NavigationContent extends StatelessWidget {
       icon: Icons.health_and_safety_rounded,
       route: AppRoutes.emergencyRecovery,
     ),
-    _NavigationItem(
-      label: 'File Browser',
-      icon: Icons.folder_open_rounded,
-      route: AppRoutes.legacyFileBrowser,
-    ),
+
     _NavigationItem(
       label: 'File Transfer',
       icon: Icons.swap_horiz_rounded,
@@ -422,3 +418,4 @@ class _NavigationTile extends StatelessWidget {
     );
   }
 }
+

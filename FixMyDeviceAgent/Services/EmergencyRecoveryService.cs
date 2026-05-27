@@ -5,7 +5,6 @@ namespace FixMyDeviceAgent.Services;
 
 public sealed class EmergencyRecoveryService
 {
-    private const int MaxEntriesPerScan = 50000;
     private const int ProgressInterval = 1000;
 
     private static readonly IReadOnlyList<RecoveryApprovedLocation> DefaultUserFolderTemplates =
@@ -112,7 +111,8 @@ public sealed class EmergencyRecoveryService
         return IsExistingDirectory(resolvedPath) ? resolvedPath : string.Empty;
     }
 
-    public IReadOnlyList<RecoveryFileEntry> ScanApprovedLocations(IReadOnlyList<RecoveryApprovedLocation> approvedLocations)
+    public IReadOnlyList<RecoveryFileEntry> ScanApprovedLocations(
+        IReadOnlyList<RecoveryApprovedLocation> approvedLocations)
     {
         var entries = new List<RecoveryFileEntry>();
         var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -120,11 +120,6 @@ public sealed class EmergencyRecoveryService
 
         foreach (var location in NormalizeApprovedLocations(approvedLocations))
         {
-            if (entries.Count >= MaxEntriesPerScan)
-            {
-                break;
-            }
-
             var rootPath = ResolveApprovedLocationPath(location);
             if (!IsExistingDirectory(rootPath) || IsUnsafeSystemPath(rootPath))
             {
@@ -132,23 +127,17 @@ public sealed class EmergencyRecoveryService
             }
 
             var rootDescriptor = BuildRootDescriptor(location, rootPath);
-
             AddDirectoryEntry(rootPath, rootDescriptor, entries, seenPaths, ref totalScanned);
 
             var pendingDirectories = new Stack<string>();
             pendingDirectories.Push(rootPath);
 
-            while (pendingDirectories.Count > 0 && entries.Count < MaxEntriesPerScan)
+            while (pendingDirectories.Count > 0)
             {
                 var currentDirectory = pendingDirectories.Pop();
 
                 foreach (var childDirectory in SafeEnumerateDirectories(currentDirectory))
                 {
-                    if (entries.Count >= MaxEntriesPerScan)
-                    {
-                        break;
-                    }
-
                     if (ShouldSkipDirectory(childDirectory))
                     {
                         continue;
@@ -172,18 +161,13 @@ public sealed class EmergencyRecoveryService
                         IsDirectory = true,
                         DriveLetter = GetDriveLetter(normalizedDirectory),
                     });
-                    ReportProgress(++totalScanned, rootDescriptor.Label);
+                    ReportProgress(++totalScanned);
 
                     pendingDirectories.Push(childDirectory.FullName);
                 }
 
                 foreach (var file in SafeEnumerateFiles(currentDirectory))
                 {
-                    if (entries.Count >= MaxEntriesPerScan)
-                    {
-                        break;
-                    }
-
                     if (ShouldSkipFile(file))
                     {
                         continue;
@@ -207,21 +191,12 @@ public sealed class EmergencyRecoveryService
                         IsDirectory = false,
                         DriveLetter = GetDriveLetter(normalizedFile),
                     });
-                    ReportProgress(++totalScanned, rootDescriptor.Label);
+                    ReportProgress(++totalScanned);
                 }
             }
         }
 
-        if (entries.Count >= MaxEntriesPerScan)
-        {
-            WriteProgressMessage(
-                $"Emergency Recovery scan reached the safety limit of {MaxEntriesPerScan:N0} items. Syncing the first {entries.Count:N0} entries.");
-        }
-        else
-        {
-            WriteProgressMessage($"Emergency Recovery scan completed with {entries.Count:N0} items.");
-        }
-
+        WriteProgressMessage($"Emergency Recovery scan completed with {entries.Count:N0} items.");
         return entries;
     }
 
@@ -271,9 +246,7 @@ public sealed class EmergencyRecoveryService
             ? GetDefaultLabelForPath(normalizedResolvedPath)
             : location.Label.Trim();
 
-        return new RootDescriptor(
-            normalizedLabel,
-            normalizedResolvedPath);
+        return new RootDescriptor(normalizedLabel, normalizedResolvedPath);
     }
 
     private static void AddDirectoryEntry(
@@ -306,18 +279,17 @@ public sealed class EmergencyRecoveryService
             IsDirectory = true,
             DriveLetter = GetDriveLetter(normalizedPath),
         });
-        ReportProgress(++totalScanned, rootDescriptor.Label);
+        ReportProgress(++totalScanned);
     }
 
-    private static void ReportProgress(int totalScanned, string rootLabel)
+    private static void ReportProgress(int totalScanned)
     {
         if (totalScanned % ProgressInterval != 0)
         {
             return;
         }
 
-        WriteProgressMessage(
-            $"Emergency Recovery scan progress: {totalScanned:N0}/{MaxEntriesPerScan:N0} items indexed. Current root: {rootLabel}");
+        WriteProgressMessage($"Scanned {totalScanned:N0} files...");
     }
 
     private static void WriteProgressMessage(string message)

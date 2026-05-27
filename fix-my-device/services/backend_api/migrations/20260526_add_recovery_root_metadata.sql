@@ -16,6 +16,12 @@ create table if not exists public.recovery_settings (
   updated_at timestamp with time zone default now()
 );
 
+alter table if exists public.recovery_settings
+  add column if not exists settings_updated_at timestamp with time zone;
+
+alter table if exists public.recovery_settings
+  add column if not exists scan_requested_at timestamp with time zone;
+
 create unique index if not exists idx_recovery_settings_owner_device
   on public.recovery_settings(user_id, device_id);
 

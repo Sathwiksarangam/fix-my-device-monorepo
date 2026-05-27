@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Net.Http.Headers;
 using FixMyDeviceAgent.Models;
 
 namespace FixMyDeviceAgent.Services;
@@ -14,8 +14,10 @@ public sealed class AgentRuntimeService : IDisposable
     private const string DashboardUrl = "https://fix-my-device.netlify.app";
     private const string DeviceInfoEndpoint = "/api/devices/system-info-by-code";
     private const string RecoverySettingsEndpoint = "/api/recovery/settings";
-    private const string RecoveryUploadEndpoint = "/api/recovery/file-listings";
+    private const string AgentRecoverySettingsEndpoint = "/api/agent/recovery/settings";
+    private const string RecoveryUploadBatchEndpoint = "/api/recovery/file-listings/batch";
     private const string AgentPendingJobsEndpoint = "/api/agent/jobs/pending";
+    private const int RecoveryUploadBatchSize = 1000;
 
     private readonly AgentStorageService _storageService;
     private readonly WindowsDeviceInfoService _deviceInfoService;
@@ -86,7 +88,7 @@ public sealed class AgentRuntimeService : IDisposable
         }
         catch
         {
-            // Best-effort action for console menu.
+            // Best-effort action for troubleshooting.
         }
     }
 
@@ -129,12 +131,7 @@ public sealed class AgentRuntimeService : IDisposable
         }
 
         var recoveryConfig = await _storageService.LoadRecoveryConfigAsync() ??
-                             new RecoveryConfig
-                             {
-                                 Enabled = false,
-                                 ApprovedLocations = [],
-                                 UpdatedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
-                             };
+                             _recoveryService.CreateDefaultConfig();
 
         return await RunSyncAsync(agentConfig, recoveryConfig);
     }
@@ -150,12 +147,11 @@ public sealed class AgentRuntimeService : IDisposable
         }
 
         var deviceInfo = _deviceInfoService.GetDeviceInfo();
-        var devicePayload = BuildDevicePayload(normalizedSetupCode, deviceInfo);
         var traces = new List<ApiCallTrace>();
 
         var deviceSendResult = await SendPostAsync(
             $"{BackendBaseUrl}{DeviceInfoEndpoint}",
-            devicePayload.ToJsonString(_jsonOptions));
+            BuildDevicePayload(normalizedSetupCode, deviceInfo).ToJsonString(_jsonOptions));
         traces.Add(deviceSendResult.ToTrace("Device Sync"));
 
         if (deviceSendResult.StatusCode == HttpStatusCode.Unauthorized)
@@ -174,32 +170,11 @@ public sealed class AgentRuntimeService : IDisposable
                 traces);
         }
 
-        var approvedLocations = NormalizeApprovedLocationsForSync(recoveryConfig.ApprovedLocations);
-        var normalizedRecoveryConfig = new RecoveryConfig
-        {
-            Enabled = recoveryConfig.Enabled && approvedLocations.Count > 0,
-            ApprovedLocations = approvedLocations,
-            UpdatedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
-        };
+        var localRecoveryConfig = NormalizeRecoveryConfig(recoveryConfig);
+        var remoteRecoveryResult = await FetchAgentRecoverySettingsAsync(normalizedSetupCode, deviceInfo);
+        traces.Add(remoteRecoveryResult.Trace);
 
-        var recoverySettingsPayload = new JsonObject
-        {
-            ["setupCode"] = normalizedSetupCode,
-            ["agentSetupCode"] = normalizedSetupCode,
-            ["deviceId"] = deviceInfo.DeviceId,
-            ["deviceName"] = deviceInfo.DeviceName,
-            ["enabled"] = normalizedRecoveryConfig.Enabled,
-            ["approvedLocations"] = JsonSerializer.SerializeToNode(
-                normalizedRecoveryConfig.ApprovedLocations,
-                _jsonOptions),
-        };
-
-        var recoverySettingsResult = await SendPostAsync(
-            $"{BackendBaseUrl}{RecoverySettingsEndpoint}",
-            recoverySettingsPayload.ToJsonString(_jsonOptions));
-        traces.Add(recoverySettingsResult.ToTrace("Recovery Settings"));
-
-        if (recoverySettingsResult.StatusCode == HttpStatusCode.Unauthorized)
+        if (remoteRecoveryResult.IsUnauthorized)
         {
             await _storageService.DeleteAgentConfigAsync();
             return SyncExecutionResult.Unauthorized(
@@ -207,22 +182,59 @@ public sealed class AgentRuntimeService : IDisposable
                 traces);
         }
 
-        if (!recoverySettingsResult.IsSuccessStatusCode)
+        if (!remoteRecoveryResult.IsSuccess)
         {
             return SyncExecutionResult.Failed(
-                recoverySettingsResult.ErrorMessage ??
-                "Emergency Recovery settings could not be saved.",
+                remoteRecoveryResult.ErrorMessage ??
+                "Unable to load Emergency Recovery settings for this device.",
                 traces);
         }
 
-        await _storageService.SaveRecoveryConfigAsync(normalizedRecoveryConfig);
+        var effectiveRecoveryConfig = ResolveEffectiveRecoveryConfig(
+            localRecoveryConfig,
+            remoteRecoveryResult.Settings);
 
-        if (!normalizedRecoveryConfig.Enabled)
+        if (ShouldSeedRemoteRecoverySettings(localRecoveryConfig, remoteRecoveryResult.Settings))
+        {
+            var recoverySettingsPayload = BuildRecoverySettingsPayload(
+                normalizedSetupCode,
+                deviceInfo,
+                localRecoveryConfig);
+            var recoverySettingsResult = await SendPostAsync(
+                $"{BackendBaseUrl}{RecoverySettingsEndpoint}",
+                recoverySettingsPayload.ToJsonString(_jsonOptions));
+            traces.Add(recoverySettingsResult.ToTrace("Recovery Settings Seed"));
+
+            if (recoverySettingsResult.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                await _storageService.DeleteAgentConfigAsync();
+                return SyncExecutionResult.Unauthorized(
+                    "The saved Agent Setup Code is no longer valid.",
+                    traces);
+            }
+
+            if (!recoverySettingsResult.IsSuccessStatusCode)
+            {
+                return SyncExecutionResult.Failed(
+                    recoverySettingsResult.ErrorMessage ??
+                    "Emergency Recovery settings could not be saved.",
+                    traces);
+            }
+
+            effectiveRecoveryConfig = localRecoveryConfig with
+            {
+                UpdatedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            };
+        }
+
+        await _storageService.SaveRecoveryConfigAsync(effectiveRecoveryConfig);
+
+        if (!effectiveRecoveryConfig.Enabled)
         {
             await ProcessPendingAgentJobsAsync(
                 normalizedSetupCode,
                 deviceInfo,
-                normalizedRecoveryConfig,
+                effectiveRecoveryConfig,
                 traces);
 
             return SyncExecutionResult.Success(
@@ -230,45 +242,53 @@ public sealed class AgentRuntimeService : IDisposable
                 traces);
         }
 
-        var recoveryEntries = _recoveryService.ScanApprovedLocations(normalizedRecoveryConfig.ApprovedLocations);
-        var recoveryFileListPayload = new JsonObject
-        {
-            ["setupCode"] = normalizedSetupCode,
-            ["agentSetupCode"] = normalizedSetupCode,
-            ["deviceId"] = deviceInfo.DeviceId,
-            ["deviceName"] = deviceInfo.DeviceName,
-            ["entries"] = JsonSerializer.SerializeToNode(recoveryEntries, _jsonOptions),
-        };
+        var shouldScan = ShouldRunRecoveryScan(recoveryConfig, effectiveRecoveryConfig);
+        var recoveryEntries = new List<RecoveryFileEntry>();
 
-        var recoveryUploadResult = await SendPostAsync(
-            $"{BackendBaseUrl}{RecoveryUploadEndpoint}",
-            recoveryFileListPayload.ToJsonString(_jsonOptions));
-        traces.Add(recoveryUploadResult.ToTrace("Recovery Inventory"));
-
-        if (recoveryUploadResult.StatusCode == HttpStatusCode.Unauthorized)
+        if (shouldScan)
         {
-            await _storageService.DeleteAgentConfigAsync();
-            return SyncExecutionResult.Unauthorized(
-                "The saved Agent Setup Code is no longer valid.",
+            recoveryEntries = _recoveryService.ScanApprovedLocations(effectiveRecoveryConfig.ApprovedLocations).ToList();
+            var batchUploadResult = await UploadRecoveryInventoryInBatchesAsync(
+                normalizedSetupCode,
+                deviceInfo,
+                effectiveRecoveryConfig,
+                recoveryEntries,
                 traces);
-        }
 
-        if (!recoveryUploadResult.IsSuccessStatusCode)
-        {
-            return SyncExecutionResult.Failed(
-                recoveryUploadResult.ErrorMessage ??
-                "Emergency Recovery inventory could not be uploaded.",
-                traces);
+            if (batchUploadResult.Status == SyncExecutionStatus.Unauthorized)
+            {
+                await _storageService.DeleteAgentConfigAsync();
+                return SyncExecutionResult.Unauthorized(batchUploadResult.Message, traces);
+            }
+
+            if (batchUploadResult.Status == SyncExecutionStatus.Failed)
+            {
+                return SyncExecutionResult.Failed(batchUploadResult.Message, traces);
+            }
+
+            effectiveRecoveryConfig = effectiveRecoveryConfig with
+            {
+                LastSyncedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+                LastScanRequestedAtUtc = string.Empty,
+            };
+            await _storageService.SaveRecoveryConfigAsync(effectiveRecoveryConfig);
         }
 
         await ProcessPendingAgentJobsAsync(
             normalizedSetupCode,
             deviceInfo,
-            normalizedRecoveryConfig,
+            effectiveRecoveryConfig,
             traces);
 
+        if (shouldScan)
+        {
+            return SyncExecutionResult.Success(
+                $"Device synced successfully. Recovery inventory updated with {recoveryEntries.Count:N0} entries.",
+                traces);
+        }
+
         return SyncExecutionResult.Success(
-            $"Device synced successfully. Recovery inventory updated with {recoveryEntries.Count} entries.",
+            "Device synced successfully. Recovery settings and transfer jobs are up to date.",
             traces);
     }
 
@@ -321,6 +341,24 @@ public sealed class AgentRuntimeService : IDisposable
         };
     }
 
+    private JsonObject BuildRecoverySettingsPayload(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        RecoveryConfig recoveryConfig)
+    {
+        return new JsonObject
+        {
+            ["setupCode"] = setupCode,
+            ["agentSetupCode"] = setupCode,
+            ["deviceId"] = deviceInfo.DeviceId,
+            ["deviceName"] = deviceInfo.DeviceName,
+            ["enabled"] = recoveryConfig.Enabled,
+            ["approvedLocations"] = JsonSerializer.SerializeToNode(
+                recoveryConfig.ApprovedLocations,
+                _jsonOptions),
+        };
+    }
+
     private async Task<SendResult> SendPostAsync(string url, string json)
     {
         try
@@ -346,6 +384,116 @@ public sealed class AgentRuntimeService : IDisposable
         {
             return new SendResult(false, 0, ex.Message, ex.ToString());
         }
+    }
+
+    private async Task<AgentRecoverySettingsFetchResult> FetchAgentRecoverySettingsAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo)
+    {
+        var payload = JsonSerializer.Serialize(
+            new AgentRecoverySettingsRequest(setupCode, setupCode, deviceInfo.DeviceId),
+            _jsonOptions);
+        var result = await SendPostAsync(
+            $"{BackendBaseUrl}{AgentRecoverySettingsEndpoint}",
+            payload);
+
+        if (result.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            return new AgentRecoverySettingsFetchResult(
+                false,
+                true,
+                null,
+                result.ErrorMessage,
+                result.ToTrace("Recovery Settings"));
+        }
+
+        if (!result.IsSuccessStatusCode)
+        {
+            return new AgentRecoverySettingsFetchResult(
+                false,
+                false,
+                null,
+                result.ErrorMessage,
+                result.ToTrace("Recovery Settings"));
+        }
+
+        try
+        {
+            var settings =
+                JsonSerializer.Deserialize<AgentRecoverySettingsResponse>(
+                    result.ResponseText,
+                    _jsonOptions);
+            return new AgentRecoverySettingsFetchResult(
+                settings is not null,
+                false,
+                settings,
+                result.ErrorMessage,
+                result.ToTrace("Recovery Settings"));
+        }
+        catch (Exception ex)
+        {
+            return new AgentRecoverySettingsFetchResult(
+                false,
+                false,
+                null,
+                ex.Message,
+                result.ToTrace("Recovery Settings"));
+        }
+    }
+
+    private async Task<SyncExecutionResult> UploadRecoveryInventoryInBatchesAsync(
+        string setupCode,
+        DeviceInfoResponse deviceInfo,
+        RecoveryConfig recoveryConfig,
+        IReadOnlyList<RecoveryFileEntry> entries,
+        ICollection<ApiCallTrace> traces)
+    {
+        var batches = ChunkRecoveryEntries(entries, RecoveryUploadBatchSize);
+        if (batches.Count == 0)
+        {
+            batches.Add([]);
+        }
+
+        for (var batchIndex = 0; batchIndex < batches.Count; batchIndex++)
+        {
+            var payload = new JsonObject
+            {
+                ["setupCode"] = setupCode,
+                ["agentSetupCode"] = setupCode,
+                ["deviceId"] = deviceInfo.DeviceId,
+                ["deviceName"] = deviceInfo.DeviceName,
+                ["entries"] = JsonSerializer.SerializeToNode(batches[batchIndex], _jsonOptions),
+                ["batchIndex"] = batchIndex,
+                ["totalBatches"] = batches.Count,
+                ["replaceExisting"] = batchIndex == 0,
+                ["isFinalBatch"] = batchIndex == batches.Count - 1,
+            };
+
+            var batchResult = await SendPostAsync(
+                $"{BackendBaseUrl}{RecoveryUploadBatchEndpoint}",
+                payload.ToJsonString(_jsonOptions));
+            traces.Add(batchResult.ToTrace($"Recovery Batch {batchIndex + 1}"));
+
+            if (batchResult.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                return SyncExecutionResult.Unauthorized(
+                    "The saved Agent Setup Code is no longer valid.",
+                    traces.ToList());
+            }
+
+            if (!batchResult.IsSuccessStatusCode)
+            {
+                return SyncExecutionResult.Failed(
+                    batchResult.ErrorMessage ?? "Emergency Recovery inventory could not be uploaded.",
+                    traces.ToList());
+            }
+
+            WriteConsoleMessage($"Uploaded batch {batchIndex + 1}/{batches.Count}...");
+        }
+
+        return SyncExecutionResult.Success(
+            "Emergency Recovery inventory uploaded successfully.",
+            traces.ToList());
     }
 
     private async Task ProcessPendingAgentJobsAsync(
@@ -529,6 +677,151 @@ public sealed class AgentRuntimeService : IDisposable
         return fullPath;
     }
 
+    private static RecoveryConfig NormalizeRecoveryConfig(RecoveryConfig recoveryConfig)
+    {
+        var approvedLocations = NormalizeApprovedLocationsForSync(recoveryConfig.ApprovedLocations);
+        return recoveryConfig with
+        {
+            Enabled = recoveryConfig.Enabled && approvedLocations.Count > 0,
+            ApprovedLocations = approvedLocations,
+            UpdatedAtUtc = NormalizeTimestamp(recoveryConfig.UpdatedAtUtc),
+            LastSyncedAtUtc = NormalizeTimestamp(recoveryConfig.LastSyncedAtUtc),
+            LastScanRequestedAtUtc = NormalizeTimestamp(recoveryConfig.LastScanRequestedAtUtc),
+        };
+    }
+
+    private static RecoveryConfig ResolveEffectiveRecoveryConfig(
+        RecoveryConfig localConfig,
+        AgentRecoverySettingsResponse? remoteSettings)
+    {
+        if (remoteSettings is null)
+        {
+            return localConfig;
+        }
+
+        var remoteLocations = NormalizeApprovedLocationsForSync(remoteSettings.ApprovedLocations ?? []);
+        var hasRemoteState = remoteSettings.Enabled ||
+                             remoteLocations.Count > 0 ||
+                             !string.IsNullOrWhiteSpace(remoteSettings.UpdatedAt) ||
+                             !string.IsNullOrWhiteSpace(remoteSettings.LastSyncedAt) ||
+                             !string.IsNullOrWhiteSpace(remoteSettings.ScanRequestedAt);
+
+        if (!hasRemoteState)
+        {
+            return localConfig;
+        }
+
+        return new RecoveryConfig
+        {
+            Enabled = remoteSettings.Enabled && remoteLocations.Count > 0,
+            ApprovedLocations = remoteLocations,
+            UpdatedAtUtc = NormalizeTimestamp(remoteSettings.UpdatedAt),
+            LastSyncedAtUtc = NormalizeTimestamp(remoteSettings.LastSyncedAt),
+            LastScanRequestedAtUtc = NormalizeTimestamp(remoteSettings.ScanRequestedAt),
+        };
+    }
+
+    private static bool ShouldSeedRemoteRecoverySettings(
+        RecoveryConfig localConfig,
+        AgentRecoverySettingsResponse? remoteSettings)
+    {
+        if (!localConfig.Enabled || localConfig.ApprovedLocations.Count == 0)
+        {
+            return false;
+        }
+
+        if (remoteSettings is null)
+        {
+            return true;
+        }
+
+        return !remoteSettings.Enabled &&
+               (remoteSettings.ApprovedLocations?.Count ?? 0) == 0 &&
+               string.IsNullOrWhiteSpace(remoteSettings.UpdatedAt) &&
+               string.IsNullOrWhiteSpace(remoteSettings.LastSyncedAt) &&
+               string.IsNullOrWhiteSpace(remoteSettings.ScanRequestedAt);
+    }
+
+    private static bool ShouldRunRecoveryScan(RecoveryConfig previousLocalConfig, RecoveryConfig effectiveConfig)
+    {
+        if (!effectiveConfig.Enabled || effectiveConfig.ApprovedLocations.Count == 0)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(effectiveConfig.LastSyncedAtUtc))
+        {
+            return true;
+        }
+
+        var lastSyncedAt = ParseTimestamp(effectiveConfig.LastSyncedAtUtc);
+        var settingsUpdatedAt = ParseTimestamp(effectiveConfig.UpdatedAtUtc);
+        var scanRequestedAt = ParseTimestamp(effectiveConfig.LastScanRequestedAtUtc);
+        var previousLastSyncedAt = ParseTimestamp(previousLocalConfig.LastSyncedAtUtc);
+
+        if (settingsUpdatedAt is not null && (lastSyncedAt is null || settingsUpdatedAt > lastSyncedAt))
+        {
+            return true;
+        }
+
+        if (scanRequestedAt is not null && (lastSyncedAt is null || scanRequestedAt > lastSyncedAt))
+        {
+            return true;
+        }
+
+        if (!AreApprovedLocationsEqual(previousLocalConfig.ApprovedLocations, effectiveConfig.ApprovedLocations))
+        {
+            return true;
+        }
+
+        return previousLastSyncedAt is null && lastSyncedAt is not null;
+    }
+
+    private static bool AreApprovedLocationsEqual(
+        IReadOnlyList<RecoveryApprovedLocation> left,
+        IReadOnlyList<RecoveryApprovedLocation> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            if (!string.Equals(NormalizePath(left[index].FullPath), NormalizePath(right[index].FullPath), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static List<List<RecoveryFileEntry>> ChunkRecoveryEntries(
+        IReadOnlyList<RecoveryFileEntry> entries,
+        int batchSize)
+    {
+        var batches = new List<List<RecoveryFileEntry>>();
+        for (var start = 0; start < entries.Count; start += batchSize)
+        {
+            var count = Math.Min(batchSize, entries.Count - start);
+            batches.Add(entries.Skip(start).Take(count).ToList());
+        }
+
+        return batches;
+    }
+
+    private static void WriteConsoleMessage(string message)
+    {
+        try
+        {
+            Console.WriteLine(message);
+        }
+        catch
+        {
+        }
+    }
+
     private static string NormalizeSetupCode(string? setupCode)
     {
         return string.IsNullOrWhiteSpace(setupCode)
@@ -583,6 +876,20 @@ public sealed class AgentRuntimeService : IDisposable
         return normalized;
     }
 
+    private static string NormalizeTimestamp(string? value)
+    {
+        return DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed.ToUniversalTime().ToString("O")
+            : string.Empty;
+    }
+
+    private static DateTimeOffset? ParseTimestamp(string? value)
+    {
+        return DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed.ToUniversalTime()
+            : null;
+    }
+
     private static string ExtractErrorMessage(string responseText, HttpStatusCode statusCode)
     {
         if (string.IsNullOrWhiteSpace(responseText))
@@ -623,6 +930,27 @@ public sealed class AgentRuntimeService : IDisposable
                 ResponseText);
         }
     }
+
+    private sealed record AgentRecoverySettingsFetchResult(
+        bool IsSuccess,
+        bool IsUnauthorized,
+        AgentRecoverySettingsResponse? Settings,
+        string ErrorMessage,
+        ApiCallTrace Trace);
+
+    private sealed record AgentRecoverySettingsRequest(
+        string SetupCode,
+        string AgentSetupCode,
+        string DeviceId);
+
+    private sealed record AgentRecoverySettingsResponse(
+        string DeviceId,
+        string DeviceName,
+        bool Enabled,
+        List<RecoveryApprovedLocation>? ApprovedLocations,
+        string LastSyncedAt,
+        string UpdatedAt,
+        string ScanRequestedAt);
 }
 
 public sealed class SyncExecutionResult
